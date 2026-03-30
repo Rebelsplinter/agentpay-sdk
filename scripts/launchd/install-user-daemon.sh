@@ -265,6 +265,11 @@ else
   rm -f "$relay_token_file"
 fi
 
+security delete-generic-password \
+  -s "$keychain_service" \
+  -a "$keychain_account" \
+  /Library/Keychains/System.keychain >/dev/null 2>&1 || true
+
 "$managed_keychain_helper" replace-generic-password \
   --keychain /Library/Keychains/System.keychain \
   --service "$keychain_service" \

@@ -2,6 +2,15 @@
 
 All notable changes to AgentPay SDK are documented in this file.
 
+## [0.2.1] - 2026-03-30
+
+- fixed Tempo session signing hash: `getSignPayload()` is now called without `from`, avoiding Keychain-wrapped hashes (`0x04 || txHash || address`) that broke server-side `ecrecover` for session open and top-up transactions
+- fixed MPP session close to forward the original request method, headers, and body instead of hardcoding an empty `POST`
+- fixed `admin setup` to detect stale managed launchd installs: when the daemon responds but the on-disk managed binaries are outdated, setup now refreshes the install instead of skipping it
+- changed managed-state probe socket from a `mkdtemp`-based path to a sibling file alongside the daemon socket, cleaned up via `sudo rm` instead of `fs.rmSync`
+- added `security delete-generic-password` before `replace-generic-password` in the launchd install script to avoid duplicate keychain entries
+- simplified sudo `writeChildStdin` by removing redundant `close`/`childClose` event listeners
+
 ## [0.2.0] - 2026-03-27
 
 - added `agentpay x402 <url>` for exact/EIP-3009 x402 HTTP payments

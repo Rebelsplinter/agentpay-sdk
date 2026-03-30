@@ -14,6 +14,10 @@ test('launchd install flow wires the root-only keychain helper into daemon setup
     installScript,
     /install -o root -g wheel -m 700 "\$keychain_helper" "\$temp_keychain_helper"/,
   );
+  assert.match(
+    installScript,
+    /security delete-generic-password \\\n  -s "\$keychain_service" \\\n  -a "\$keychain_account" \\\n  \/Library\/Keychains\/System\.keychain >\/dev\/null 2>&1 \|\| true/,
+  );
   assert.match(installScript, /"\$managed_keychain_helper" replace-generic-password/);
   assert.match(installScript, /<key>AGENTPAY_KEYCHAIN_HELPER<\/key>/);
 

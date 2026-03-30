@@ -1113,8 +1113,13 @@ async function managedStateAcceptsRequestedVaultPassword(
     daemonSocket,
     stateFile,
   );
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'agentpay-managed-state-probe-'));
-  const tempSocket = path.join(tempRoot, 'daemon.sock');
+  const tempSocket = assertTrustedRootPlannedDaemonSocketPath(
+    path.join(
+      path.dirname(path.resolve(daemonSocket)),
+      `agentpay-managed-state-probe-${process.pid}-${Date.now()}.sock`,
+    ),
+    'Managed daemon state probe socket',
+  );
   const allowedUid = String(process.getuid?.() ?? process.geteuid?.() ?? 0);
   const probeScript = [
     'set -euo pipefail',
@@ -1178,7 +1183,7 @@ async function managedStateAcceptsRequestedVaultPassword(
     );
   } finally {
     try {
-      fs.rmSync(tempRoot, { recursive: true, force: true });
+      await sudoSession.run(['/bin/rm', '-f', tempSocket]);
     } catch {}
   }
 }
@@ -1510,16 +1515,21 @@ async function runAdminSetup(options: AdminSetupOptions): Promise<void> {
     existingDaemonResponding = true;
     const accepted = await daemonAcceptsVaultPassword(config, daemonSocket, vaultPassword);
     if (accepted) {
-      installIsCurrent = true;
-      daemon = {
-        label: DEFAULT_LAUNCH_DAEMON_LABEL,
-        runnerPath: installedPaths?.runnerPath ?? resolveManagedLaunchDaemonPaths().runnerPath,
-        daemonBin: installedPaths?.daemonBin ?? resolveManagedLaunchDaemonPaths().daemonBin,
-        stateFile,
-        keychainAccount: os.userInfo().username,
-        keychainService: DAEMON_PASSWORD_KEYCHAIN_SERVICE,
-      };
-      existingDaemonProgress.succeed('Existing daemon is ready and accepted the vault password');
+      if (installIsCurrent) {
+        daemon = {
+          label: DEFAULT_LAUNCH_DAEMON_LABEL,
+          runnerPath: installedPaths?.runnerPath ?? resolveManagedLaunchDaemonPaths().runnerPath,
+          daemonBin: installedPaths?.daemonBin ?? resolveManagedLaunchDaemonPaths().daemonBin,
+          stateFile,
+          keychainAccount: os.userInfo().username,
+          keychainService: DAEMON_PASSWORD_KEYCHAIN_SERVICE,
+        };
+        existingDaemonProgress.succeed('Existing daemon is ready and accepted the vault password');
+      } else {
+        existingDaemonProgress.succeed(
+          'Existing daemon is ready but the managed install is stale; setup will refresh it',
+        );
+      }
     } else {
       existingDaemonRejectedPassword = true;
       existingDaemonProgress.succeed(
