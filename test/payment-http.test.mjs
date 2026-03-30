@@ -1136,8 +1136,9 @@ test('agentpay mpp opens and closes a one-shot Tempo session request', async () 
 
         assert.equal(requestCount, 3);
         assert.equal(req.method, 'POST');
-        assert.equal(req.headers['x-client-test'], undefined);
-        assert.equal(_body, '');
+        assert.equal(req.headers['content-type'], 'application/json');
+        assert.equal(req.headers['x-client-test'], 'session');
+        assert.equal(_body, expectedRequestBody);
         assert.equal(parsed.payload.action, 'close');
         assert.equal(parsed.payload.channelId, openedChannelId);
         assert.equal(parsed.payload.cumulativeAmount, '1000000');
@@ -1538,8 +1539,9 @@ test('agentpay mpp reuses persisted Tempo session state and closes it on demand'
         assert.equal(parsed.payload.action, 'close');
         assert.equal(parsed.payload.channelId, openedChannelId);
         assert.equal(parsed.payload.cumulativeAmount, '2000000');
-        assert.equal(req.headers['x-client-test'], undefined);
-        assert.equal(_body, '');
+        assert.equal(req.headers['x-client-test'], 'reuse');
+        assert.equal(req.headers['content-type'], 'application/json');
+        assert.equal(_body, expectedRequestBody);
         const closeReceipt = {
           method: 'tempo',
           intent: 'session',
@@ -2293,7 +2295,9 @@ test('agentpay mpp handles payment-need-voucher events during a Tempo session st
         assert.equal(parsed.payload.action, 'close');
         assert.equal(parsed.payload.channelId, openedChannelId);
         assert.equal(parsed.payload.cumulativeAmount, '2000000');
-        assert.equal(_body, '');
+        assert.equal(req.headers['x-client-test'], 'stream');
+        assert.equal(req.headers['content-type'], 'application/json');
+        assert.equal(_body, expectedRequestBody);
         const closeReceipt = {
           method: 'tempo',
           intent: 'session',
@@ -2547,6 +2551,9 @@ test('agentpay mpp emits NDJSON events for Tempo session streams in --json mode'
         assert.equal(requestCount, 5);
         assert.equal(parsed.payload.action, 'close');
         assert.equal(parsed.payload.channelId, openedChannelId);
+        assert.equal(req.headers['x-client-test'], 'stream-json');
+        assert.equal(req.headers['content-type'], 'application/json');
+        assert.equal(_body, expectedRequestBody);
         const closeReceipt = {
           method: 'tempo',
           intent: 'session',

@@ -1678,9 +1678,7 @@ async function buildTempoSessionOpenPayload(input: {
   };
   const envelope = TempoTransaction.z_TxEnvelopeTempo.from(unsignedTransaction as never);
   const signingHashHex = assertHex(
-    TempoTransaction.z_TxEnvelopeTempo.getSignPayload(envelope, {
-      from: input.walletAddress,
-    }) as Hex,
+    TempoTransaction.z_TxEnvelopeTempo.getSignPayload(envelope) as Hex,
     'tempo session open signing hash',
   );
   const transactionSignatureHex = await signAgentTempoSessionOpenTransaction({
@@ -1874,9 +1872,7 @@ async function buildTempoSessionTopUpPayload(input: {
   };
   const envelope = TempoTransaction.z_TxEnvelopeTempo.from(unsignedTransaction as never);
   const signingHashHex = assertHex(
-    TempoTransaction.z_TxEnvelopeTempo.getSignPayload(envelope, {
-      from: input.walletAddress,
-    }) as Hex,
+    TempoTransaction.z_TxEnvelopeTempo.getSignPayload(envelope) as Hex,
     'tempo session topUp signing hash',
   );
   const transactionSignatureHex = await signAgentTempoSessionTopUpTransaction({
@@ -1912,6 +1908,7 @@ async function handleTempoSessionStreamResponse(input: {
   response: Response;
   asJson: boolean;
   challenge: ReturnType<typeof parseMppChallengeFromHeaders>;
+  requestInit: RequestInit;
   auth: AgentCommandAuthOptions;
   config: WlfiConfig;
   targetUrl: string;
@@ -2149,9 +2146,9 @@ async function handleTempoSessionStreamResponse(input: {
       cumulativeAmountWei: spentWei > 0n ? spentWei : activeCumulativeAmountWei,
     });
     const closeResponse = await globalThis.fetch(input.targetUrl, {
-      method: 'POST',
+      ...input.requestInit,
       headers: withAuthorizationHeader(
-        undefined,
+        input.requestInit.headers,
         serializeMppCredentialHeader({
           challenge: input.challenge,
           payload: closePayload,
@@ -4705,6 +4702,7 @@ async function main() {
           response: paidResponse,
           asJson: options.json,
           challenge,
+          requestInit,
           auth: options,
           config,
           targetUrl,
@@ -4740,9 +4738,9 @@ async function main() {
           cumulativeAmountWei: activeCumulativeAmountWei,
         });
         const closeResponse = await globalThis.fetch(targetUrl, {
-          method: 'POST',
+          ...requestInit,
           headers: withAuthorizationHeader(
-            undefined,
+            requestInit.headers,
             serializeMppCredentialHeader({
               challenge,
               payload: closePayload,
