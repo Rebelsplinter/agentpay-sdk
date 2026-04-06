@@ -10,14 +10,23 @@ const MIN_RUST_VERSION = {
   minor: 87,
   patch: 0,
 };
-const rustBins = [
-  'agentpay-daemon',
-  'agentpay-admin',
-  'agentpay-agent',
-  'agentpay-system-keychain',
-];
+const commonRustBins = ['agentpay-daemon', 'agentpay-admin', 'agentpay-agent'];
+const macOsRustBins = ['agentpay-system-keychain'];
 const RERUN_INSTRUCTIONS =
   'After installing prerequisites, rerun the source install steps from this repo checkout: `npm run build && npm run install:cli-launcher && npm run install:rust-binaries`.';
+
+function assertSupportedSourceInstallPlatform(platform) {
+  if (platform !== 'win32') {
+    return;
+  }
+
+  throw new Error(
+    '[agentpay] Windows source installs are not supported yet.\n' +
+      '[agentpay] The current Rust runtime depends on Unix-domain socket transports and macOS/Linux daemon flows.\n' +
+      '[agentpay] Use macOS or Linux for a full source install.\n' +
+      '[agentpay] If you only need the JavaScript workspace on Windows, rerun with `AGENTPAY_SKIP_RUST_INSTALL=1 pnpm install`.',
+  );
+}
 
 function fileUrlToPathForPlatform(fileUrl, platform = process.platform) {
   if (platform === process.platform) {
@@ -123,7 +132,19 @@ function resolveAgentPayPaths(env) {
   };
 }
 
-function resolveHelperScripts(binDir) {
+export function resolveRustBinariesForPlatform(platform = process.platform) {
+  if (platform === 'darwin') {
+    return [...commonRustBins, ...macOsRustBins];
+  }
+
+  return [...commonRustBins];
+}
+
+function resolveHelperScripts(binDir, platform = process.platform) {
+  if (platform !== 'darwin') {
+    return [];
+  }
+
   return [
     {
       source: path.join(repoRoot, 'scripts', 'launchd', 'run-agentpay-daemon.sh'),
@@ -292,10 +313,12 @@ export function installRustBinaries({
     return 0;
   }
 
+  assertSupportedSourceInstallPlatform(platform);
   verifyRustInstallPrerequisites({ spawnSyncImpl, platform });
 
   const { agentpayHome, binDir } = resolveAgentPayPaths(env);
-  const helperScripts = resolveHelperScripts(binDir);
+  const helperScripts = resolveHelperScripts(binDir, platform);
+  const rustBins = resolveRustBinariesForPlatform(platform);
 
   fs.mkdirSync(binDir, { recursive: true, mode: 0o700 });
   const build = spawnSyncImpl(

@@ -1,3 +1,4 @@
+import { Challenge } from 'mppx';
 import { type Hex, hexToBytes, keccak256, stringToHex, toHex } from 'viem';
 
 export interface MppChallengeRequest {
@@ -29,6 +30,10 @@ export interface MppChallenge {
   digest?: string;
   expires?: string;
   opaque?: Record<string, string>;
+}
+
+export interface SelectMppChallengeOptions {
+  targetUrl?: string;
 }
 
 export type MppCredentialPayload =
@@ -427,12 +432,130 @@ function requireHeaderField(value: string | undefined, label: string): string {
   return value;
 }
 
-export function parseMppChallengeFromHeaders(headers: Headers): MppChallenge {
+function parseChallenge(value: unknown): MppChallenge {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('MPP challenge must be an object');
+  }
+
+  const challenge = value as Record<string, unknown>;
+  return {
+    id: requireHeaderField(
+      typeof challenge.id === 'string' ? challenge.id : undefined,
+      'id',
+    ),
+    realm: requireHeaderField(
+      typeof challenge.realm === 'string' ? challenge.realm : undefined,
+      'realm',
+    ),
+    method: requireHeaderField(
+      typeof challenge.method === 'string' ? challenge.method : undefined,
+      'method',
+    ),
+    intent: requireHeaderField(
+      typeof challenge.intent === 'string' ? challenge.intent : undefined,
+      'intent',
+    ),
+    request: parseChallengeRequest(challenge.request),
+    description:
+      typeof challenge.description === 'string' ? challenge.description : undefined,
+    digest: typeof challenge.digest === 'string' ? challenge.digest : undefined,
+    expires: typeof challenge.expires === 'string' ? challenge.expires : undefined,
+    opaque:
+      challenge.opaque !== undefined
+        ? assertStringRecord(challenge.opaque, 'opaque')
+        : undefined,
+  };
+}
+
+export function parseMppChallengeHeadersList(header: string): MppChallenge[] {
+  const parsed = Challenge.deserializeList(header);
+  const challenges = parsed.map((entry) => parseChallenge(entry));
+  if (challenges.length === 0) {
+    throw new Error('Missing Payment scheme in MPP challenge');
+  }
+  return challenges;
+}
+
+export function parseMppChallengesFromHeaders(headers: Headers): MppChallenge[] {
   const header = headers.get('WWW-Authenticate');
   if (!header) {
     throw new Error('MPP response is missing the WWW-Authenticate header');
   }
-  return parseMppChallengeHeader(header);
+  return parseMppChallengeHeadersList(header);
+}
+
+function inferPreferredMppChainIdFromUrl(targetUrl: string | undefined): number | null {
+  if (!targetUrl?.trim()) {
+    return null;
+  }
+
+  const value = targetUrl.toLowerCase();
+  if (value.includes('tempo-testnet') || value.includes('moderato') || value.includes('testnet')) {
+    return 42431;
+  }
+  if (value.includes('tempo-mainnet')) {
+    return 4217;
+  }
+  return null;
+}
+
+function challengeSelectionScore(
+  challenge: MppChallenge,
+  options: SelectMppChallengeOptions = {},
+): number {
+  let score = 0;
+
+  if (challenge.method === 'tempo') {
+    score += 1_000;
+  }
+
+  const preferredChainId = inferPreferredMppChainIdFromUrl(options.targetUrl);
+  const challengeChainId = challenge.request.methodDetails?.chainId;
+  if (preferredChainId !== null) {
+    score += challengeChainId === preferredChainId ? 100 : -100;
+  }
+
+  if (challengeChainId === 4217) {
+    score += 20;
+  } else if (challengeChainId === 42431) {
+    score += 10;
+  }
+
+  const currency = challenge.request.currency.toLowerCase();
+  if (currency === '0x20c0000000000000000000000000000000000000') {
+    score += 5;
+  }
+
+  return score;
+}
+
+export function selectMppChallenge(
+  challenges: MppChallenge[],
+  options: SelectMppChallengeOptions = {},
+): MppChallenge {
+  if (challenges.length === 0) {
+    throw new Error('MPP response did not contain any payment challenges');
+  }
+
+  return [...challenges].sort((left, right) => {
+    const scoreDifference =
+      challengeSelectionScore(right, options) - challengeSelectionScore(left, options);
+    if (scoreDifference !== 0) {
+      return scoreDifference;
+    }
+
+    const leftChainId = left.request.methodDetails?.chainId ?? 0;
+    const rightChainId = right.request.methodDetails?.chainId ?? 0;
+    if (leftChainId !== rightChainId) {
+      return rightChainId - leftChainId;
+    }
+
+    return left.request.currency.localeCompare(right.request.currency);
+  })[0];
+}
+
+export function parseMppChallengeFromHeaders(headers: Headers): MppChallenge {
+  return selectMppChallenge(parseMppChallengesFromHeaders(headers));
 }
 
 export function deserializeMppReceiptHeader(header: string): MppReceipt {

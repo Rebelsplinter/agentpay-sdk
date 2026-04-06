@@ -6,7 +6,11 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { installLocalCliLauncher } from '../scripts/install-cli-launcher.mjs';
-import { installCliLauncher, resolveRepoRootFromMetaUrl } from '../scripts/install-rust-binaries.mjs';
+import {
+  installCliLauncher,
+  resolveRepoRootFromMetaUrl,
+  resolveRustBinariesForPlatform,
+} from '../scripts/install-rust-binaries.mjs';
 
 const modulePath = new URL('../scripts/install-rust-binaries.mjs', import.meta.url);
 
@@ -167,6 +171,26 @@ test('installRustBinaries respects AGENTPAY_SKIP_RUST_INSTALL', async () => {
   assert.equal(called, false);
 });
 
+test('installRustBinaries rejects unsupported Windows source installs before invoking cargo', async () => {
+  const installRust = await import(`${modulePath.href}?case=${Date.now()}-windows-unsupported`);
+  let called = false;
+
+  assert.throws(
+    () =>
+      installRust.installRustBinaries({
+        platform: 'win32',
+        env: {},
+        spawnSyncImpl() {
+          called = true;
+          return result(0);
+        },
+      }),
+    /Windows source installs are not supported yet/u,
+  );
+
+  assert.equal(called, false);
+});
+
 test('installRustBinaries preserves signal-derived cargo build exit codes', async () => {
   const installRust = await import(`${modulePath.href}?case=${Date.now()}-signal-build`);
   const agentpayHome = makeTempRoot('agentpay-install-signal-build-');
@@ -193,6 +217,23 @@ test('installRustBinaries preserves signal-derived cargo build exit codes', asyn
   } finally {
     fs.rmSync(agentpayHome, { recursive: true, force: true });
   }
+});
+
+test('resolveRustBinariesForPlatform excludes macOS-only binaries on Linux', () => {
+  assert.deepEqual(resolveRustBinariesForPlatform('linux'), [
+    'agentpay-daemon',
+    'agentpay-admin',
+    'agentpay-agent',
+  ]);
+});
+
+test('resolveRustBinariesForPlatform includes macOS-only binaries on darwin', () => {
+  assert.deepEqual(resolveRustBinariesForPlatform('darwin'), [
+    'agentpay-daemon',
+    'agentpay-admin',
+    'agentpay-agent',
+    'agentpay-system-keychain',
+  ]);
 });
 
 test('installCliLauncher writes a POSIX agentpay launcher that forwards args', () => {

@@ -6,8 +6,10 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { keccak256, parseSignature } from 'viem';
+import * as MppxTempo from 'mppx/tempo';
+import { createPublicClient, http as viemHttp, keccak256, parseSignature } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
+import { tempo as tempoChain } from 'viem/chains';
 import { Actions as TempoActions, Transaction as TempoTransaction } from 'viem/tempo';
 import { estimateFees } from '../packages/rpc/src/index.ts';
 
@@ -963,18 +965,10 @@ test('agentpay mpp opens and closes a one-shot Tempo session request', async () 
   const socketPath = path.join(agentpayHome, 'daemon.sock');
   fs.mkdirSync(rustBinDir, { recursive: true, mode: 0o700 });
 
-  const account = privateKeyToAccount(
-    '0x59c6995e998f97a5a0044966f094538f5f4e0e46f95cebf7f5f88f5f2b5b9f10',
-  );
+  const accountPrivateKey =
+    '0x59c6995e998f97a5a0044966f094538f5f4e0e46f95cebf7f5f88f5f2b5b9f10';
+  const account = privateKeyToAccount(accountPrivateKey);
   const walletAddress = account.address;
-  const openSignatureHex = await account.sign({
-    hash: `0x${'1'.repeat(64)}`,
-  });
-  const voucherSignatureHex = await account.sign({
-    hash: `0x${'2'.repeat(64)}`,
-  });
-  const openSignatureArtifacts = recoverableSignatureArtifacts(openSignatureHex, '0x30aa');
-  const voucherSignatureArtifacts = recoverableSignatureArtifacts(voucherSignatureHex, '0x30bb');
   const expectedRequestBody = JSON.stringify({ prompt: 'session' });
   const escrowContract = '0x33b901018174DDabE4841042ab76ba85D4e24f25';
 
@@ -984,58 +978,41 @@ test('agentpay mpp opens and closes a one-shot Tempo session request', async () 
     txHash: `0x${'9'.repeat(64)}`,
     from: walletAddress,
     to: TOKEN_ADDRESS,
+    methodOverrides: {
+      eth_call: '0x',
+    },
   });
   let server = null;
+  let openPayloadValidation = Promise.resolve();
 
   try {
     writeExecutable(
       path.join(rustBinDir, 'agentpay-agent'),
       [
-        'cmd=""',
-        'for arg in "$@"; do',
-        '  case "$arg" in',
-        '    tempo-session-open-transaction|tempo-session-voucher)',
-        '      cmd="$arg"',
-        '      break',
-        '      ;;',
-        '  esac',
-        'done',
-        'case "$cmd" in',
-        '  tempo-session-open-transaction)',
-        '    printf "{\\"command\\":\\"tempo-session-open-transaction\\",\\"network\\":\\"4217\\",\\"asset\\":\\"erc20:' +
-          TOKEN_ADDRESS +
-          '\\",\\"counterparty\\":\\"' +
-          RECIPIENT_ADDRESS +
-          '\\",\\"amount_wei\\":\\"1000000\\",\\"signature_hex\\":\\"' +
-          openSignatureArtifacts.signatureHex +
-          '\\",\\"r_hex\\":\\"' +
-          openSignatureArtifacts.rHex +
-          '\\",\\"s_hex\\":\\"' +
-          openSignatureArtifacts.sHex +
-          '\\",\\"v\\":' +
-          String(openSignatureArtifacts.v) +
-          '}"',
-        '    ;;',
-        '  tempo-session-voucher)',
-        '    printf "{\\"command\\":\\"tempo-session-voucher\\",\\"network\\":\\"4217\\",\\"asset\\":\\"erc20:' +
-          TOKEN_ADDRESS +
-          '\\",\\"counterparty\\":\\"' +
-          RECIPIENT_ADDRESS +
-          '\\",\\"amount_wei\\":\\"1000000\\",\\"signature_hex\\":\\"' +
-          voucherSignatureArtifacts.signatureHex +
-          '\\",\\"r_hex\\":\\"' +
-          voucherSignatureArtifacts.rHex +
-          '\\",\\"s_hex\\":\\"' +
-          voucherSignatureArtifacts.sHex +
-          '\\",\\"v\\":' +
-          String(voucherSignatureArtifacts.v) +
-          '}"',
-        '    ;;',
-        '  *)',
-        '    echo "unexpected-command:$cmd" 1>&2',
-        '    exit 9',
-        '    ;;',
-        'esac',
+        "exec node --input-type=module - \"$@\" <<'EOF'",
+        "import { parseSignature } from 'viem';",
+        "import { privateKeyToAccount } from 'viem/accounts';",
+        `const account = privateKeyToAccount(${JSON.stringify(accountPrivateKey)});`,
+        'const args = process.argv.slice(2);',
+        "const cmd = args.find((value) => value === 'tempo-session-open-transaction' || value === 'tempo-session-voucher');",
+        "if (!cmd) throw new Error(`unexpected-command:${args.join(' ')}`);",
+        "const hashIndex = args.indexOf('--signing-hash-hex');",
+        "if (hashIndex < 0 || !args[hashIndex + 1]) throw new Error('missing --signing-hash-hex');",
+        'const signatureHex = await account.sign({ hash: args[hashIndex + 1] });',
+        'const parsed = parseSignature(signatureHex);',
+        'const v = Number(parsed.yParity ?? (parsed.v - 27n));',
+        'process.stdout.write(JSON.stringify({',
+        '  command: cmd,',
+        "  network: '4217',",
+        `  asset: 'erc20:${TOKEN_ADDRESS}',`,
+        `  counterparty: '${RECIPIENT_ADDRESS}',`,
+        "  amount_wei: '1000000',",
+        '  signature_hex: signatureHex,',
+        '  r_hex: parsed.r,',
+        '  s_hex: parsed.s,',
+        '  v,',
+        '}));',
+        'EOF',
       ].join('\n'),
     );
     writeExecutable(path.join(rustBinDir, 'agentpay-admin'), 'printf "{}"');
@@ -1104,7 +1081,6 @@ test('agentpay mpp opens and closes a one-shot Tempo session request', async () 
           assert.equal(req.headers['x-client-test'], 'session');
           assert.equal(_body, expectedRequestBody);
           assert.equal(parsed.payload.action, 'open');
-          assert.equal(parsed.payload.signature, voucherSignatureHex);
           assert.equal(parsed.challenge.id, 'session-challenge-123');
           const tx = TempoTransaction.deserialize(parsed.payload.transaction);
           assert.equal(Array.isArray(tx.calls), true);
@@ -1112,6 +1088,31 @@ test('agentpay mpp opens and closes a one-shot Tempo session request', async () 
           assert.equal(tx.calls[0].to.toLowerCase(), TOKEN_ADDRESS.toLowerCase());
           assert.equal(tx.calls[1].to.toLowerCase(), escrowContract.toLowerCase());
           openedChannelId = parsed.payload.channelId;
+          assert.match(parsed.payload.signature, /^0x[0-9a-f]+$/iu);
+          openPayloadValidation = (async () => {
+            const verificationClient = createPublicClient({
+              chain: tempoChain,
+              transport: viemHttp(rpcUrl),
+            });
+            const verified = await MppxTempo.Session.Chain.broadcastOpenTransaction({
+              client: verificationClient,
+              serializedTransaction: parsed.payload.transaction,
+              escrowContract,
+              channelId: openedChannelId,
+              recipient: RECIPIENT_ADDRESS,
+              currency: TOKEN_ADDRESS,
+              waitForConfirmation: false,
+            });
+            assert.equal(verified.txHash, `0x${'9'.repeat(64)}`);
+            assert.equal(verified.onChain.payer.toLowerCase(), walletAddress.toLowerCase());
+            assert.equal(verified.onChain.payee.toLowerCase(), RECIPIENT_ADDRESS.toLowerCase());
+            assert.equal(verified.onChain.token.toLowerCase(), TOKEN_ADDRESS.toLowerCase());
+            assert.equal(
+              verified.onChain.authorizedSigner.toLowerCase(),
+              walletAddress.toLowerCase(),
+            );
+            assert.equal(verified.onChain.deposit, 1000000n);
+          })();
           const paymentReceipt = {
             method: 'tempo',
             intent: 'session',
@@ -1136,9 +1137,8 @@ test('agentpay mpp opens and closes a one-shot Tempo session request', async () 
 
         assert.equal(requestCount, 3);
         assert.equal(req.method, 'POST');
-        assert.equal(req.headers['content-type'], 'application/json');
-        assert.equal(req.headers['x-client-test'], 'session');
-        assert.equal(_body, expectedRequestBody);
+        assert.equal(req.headers['x-client-test'], undefined);
+        assert.equal(_body, '');
         assert.equal(parsed.payload.action, 'close');
         assert.equal(parsed.payload.channelId, openedChannelId);
         assert.equal(parsed.payload.cumulativeAmount, '1000000');
@@ -1195,6 +1195,7 @@ test('agentpay mpp opens and closes a one-shot Tempo session request', async () 
     );
 
     assert.equal(result.status, 0, combinedOutput(result));
+    await openPayloadValidation;
     const parsed = JSON.parse(result.stdout);
     assert.equal(parsed.protocol, 'mpp');
     assert.equal(parsed.status, 200);
@@ -1539,9 +1540,8 @@ test('agentpay mpp reuses persisted Tempo session state and closes it on demand'
         assert.equal(parsed.payload.action, 'close');
         assert.equal(parsed.payload.channelId, openedChannelId);
         assert.equal(parsed.payload.cumulativeAmount, '2000000');
-        assert.equal(req.headers['x-client-test'], 'reuse');
-        assert.equal(req.headers['content-type'], 'application/json');
-        assert.equal(_body, expectedRequestBody);
+        assert.equal(req.headers['x-client-test'], undefined);
+        assert.equal(_body, '');
         const closeReceipt = {
           method: 'tempo',
           intent: 'session',
@@ -2295,9 +2295,7 @@ test('agentpay mpp handles payment-need-voucher events during a Tempo session st
         assert.equal(parsed.payload.action, 'close');
         assert.equal(parsed.payload.channelId, openedChannelId);
         assert.equal(parsed.payload.cumulativeAmount, '2000000');
-        assert.equal(req.headers['x-client-test'], 'stream');
-        assert.equal(req.headers['content-type'], 'application/json');
-        assert.equal(_body, expectedRequestBody);
+        assert.equal(_body, '');
         const closeReceipt = {
           method: 'tempo',
           intent: 'session',
@@ -2551,9 +2549,6 @@ test('agentpay mpp emits NDJSON events for Tempo session streams in --json mode'
         assert.equal(requestCount, 5);
         assert.equal(parsed.payload.action, 'close');
         assert.equal(parsed.payload.channelId, openedChannelId);
-        assert.equal(req.headers['x-client-test'], 'stream-json');
-        assert.equal(req.headers['content-type'], 'application/json');
-        assert.equal(_body, expectedRequestBody);
         const closeReceipt = {
           method: 'tempo',
           intent: 'session',

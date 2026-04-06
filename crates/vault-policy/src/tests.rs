@@ -4,8 +4,8 @@ use std::str::FromStr;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 use vault_domain::{
-    AgentAction, AssetId, BroadcastTx, EntityScope, EvmAddress, PolicyAttachment, PolicyType,
-    SpendEvent, SpendingPolicy,
+    AgentAction, ApprovalType, AssetId, BroadcastTx, Eip712TypedData, EntityScope, EvmAddress,
+    PolicyAttachment, PolicyType, SpendEvent, SpendingPolicy,
 };
 
 use crate::engine::{
@@ -63,6 +63,38 @@ fn broadcast_action_with_fees(
     }
 }
 
+fn eip712_action(chain_id: u64) -> AgentAction {
+    AgentAction::Eip712TypedData {
+        typed_data: Eip712TypedData {
+            typed_data_json: format!(
+                r#"{{
+  "types": {{
+    "EIP712Domain": [
+      {{ "name": "name", "type": "string" }},
+      {{ "name": "version", "type": "string" }},
+      {{ "name": "chainId", "type": "uint256" }},
+      {{ "name": "verifyingContract", "type": "address" }}
+    ],
+    "Mail": [
+      {{ "name": "contents", "type": "string" }}
+    ]
+  }},
+  "primaryType": "Mail",
+  "domain": {{
+    "name": "AgentPay Test",
+    "version": "1",
+    "chainId": {chain_id},
+    "verifyingContract": "0x1111111111111111111111111111111111111111"
+  }},
+  "message": {{
+    "contents": "hello"
+  }}
+}}"#
+            ),
+        },
+    }
+}
+
 #[test]
 fn per_tx_limit_is_enforced() {
     let engine = PolicyEngine;
@@ -89,6 +121,91 @@ fn per_tx_limit_is_enforced() {
     assert!(matches!(
         result,
         Err(PolicyError::PerTxLimitExceeded { .. })
+    ));
+}
+
+#[test]
+fn eip712_defaults_to_manual_approval() {
+    let engine = PolicyEngine;
+    let result = engine.evaluate(
+        &[],
+        &PolicyAttachment::AllPolicies,
+        &eip712_action(1),
+        &[],
+        Uuid::new_v4(),
+        OffsetDateTime::now_utc(),
+    );
+
+    assert!(matches!(
+        result,
+        Err(PolicyError::Eip712ManualApprovalRequired {
+            policy_id: None,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn eip712_allow_policy_allows_signing() {
+    let engine = PolicyEngine;
+    let policy = SpendingPolicy::new_eip712_signing(1, ApprovalType::Allow, EntityScope::All)
+        .expect("policy");
+
+    let result = engine.evaluate(
+        &[policy],
+        &PolicyAttachment::AllPolicies,
+        &eip712_action(1),
+        &[],
+        Uuid::new_v4(),
+        OffsetDateTime::now_utc(),
+    );
+
+    assert!(result.is_ok());
+}
+
+#[test]
+fn eip712_deny_policy_rejects_signing() {
+    let engine = PolicyEngine;
+    let policy = SpendingPolicy::new_eip712_signing(1, ApprovalType::Deny, EntityScope::All)
+        .expect("policy");
+
+    let result = engine.evaluate(
+        &[policy.clone()],
+        &PolicyAttachment::AllPolicies,
+        &eip712_action(1),
+        &[],
+        Uuid::new_v4(),
+        OffsetDateTime::now_utc(),
+    );
+
+    assert!(matches!(
+        result,
+        Err(PolicyError::Eip712SigningDenied { policy_id }) if policy_id == policy.id
+    ));
+}
+
+#[test]
+fn eip712_manual_policy_requires_manual_approval() {
+    let engine = PolicyEngine;
+    let policy =
+        SpendingPolicy::new_eip712_signing(1, ApprovalType::ManualApproval, EntityScope::All)
+            .expect("policy");
+
+    let result = engine.evaluate(
+        &[policy.clone()],
+        &PolicyAttachment::AllPolicies,
+        &eip712_action(1),
+        &[],
+        Uuid::new_v4(),
+        OffsetDateTime::now_utc(),
+    );
+
+    assert!(matches!(
+        result,
+        Err(PolicyError::Eip712ManualApprovalRequired {
+            policy_id: Some(id),
+            ..
+        }) if id == policy.id
     ));
 }
 
@@ -747,6 +864,7 @@ fn legacy_calldata_policies_still_use_max_amount_as_fallback_limit() {
         recipients: EntityScope::All,
         assets: EntityScope::All,
         networks: EntityScope::All,
+        approval_type: None,
         enabled: true,
     };
     let action = broadcast_action_with_fees(2_000_000_000, 1_000_000_000, "0xdeadbeef");

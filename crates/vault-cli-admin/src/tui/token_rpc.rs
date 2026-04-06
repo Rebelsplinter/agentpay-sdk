@@ -1,3 +1,4 @@
+use alloy_chains::NamedChain;
 use anyhow::{anyhow, bail, Context, Result};
 use hex::FromHex;
 use reqwest::Client;
@@ -165,11 +166,24 @@ async fn call_rpc(client: &Client, rpc_url: &str, method: &str, params: Value) -
 }
 
 fn native_metadata_for_chain(chain_id: u64, chain_key: &str) -> (String, String) {
-    match chain_id {
-        1 | 10 | 8453 | 84532 | 42161 | 11155111 => ("Ether".to_string(), "ETH".to_string()),
-        56 => ("BNB".to_string(), "BNB".to_string()),
-        137 => ("MATIC".to_string(), "MATIC".to_string()),
-        _ => (format!("Native Asset ({chain_key})"), "NATIVE".to_string()),
+    if chain_id == 20143 {
+        return ("Monad".to_string(), "MON".to_string());
+    }
+
+    if let Ok(chain) = NamedChain::try_from(chain_id) {
+        if let Some(symbol) = chain.native_currency_symbol() {
+            return (native_currency_name(symbol).to_string(), symbol.to_string());
+        }
+    }
+
+    (format!("Native Asset ({chain_key})"), "NATIVE".to_string())
+}
+
+fn native_currency_name(symbol: &str) -> &str {
+    match symbol {
+        "ETH" => "Ether",
+        "MON" => "Monad",
+        _ => symbol,
     }
 }
 
@@ -333,10 +347,22 @@ mod tests {
         );
         assert_eq!(
             native_metadata_for_chain(137, "polygon"),
-            ("MATIC".to_string(), "MATIC".to_string())
+            ("POL".to_string(), "POL".to_string())
         );
         assert_eq!(
-            native_metadata_for_chain(999, "custom"),
+            native_metadata_for_chain(143, "monad"),
+            ("Monad".to_string(), "MON".to_string())
+        );
+        assert_eq!(
+            native_metadata_for_chain(10143, "monad-testnet"),
+            ("Monad".to_string(), "MON".to_string())
+        );
+        assert_eq!(
+            native_metadata_for_chain(20143, "monad-devnet"),
+            ("Monad".to_string(), "MON".to_string())
+        );
+        assert_eq!(
+            native_metadata_for_chain(9_999_999_999, "custom"),
             ("Native Asset (custom)".to_string(), "NATIVE".to_string())
         );
     }

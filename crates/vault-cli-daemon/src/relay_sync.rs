@@ -730,6 +730,9 @@ fn flatten_policy_records(
                         requires_manual_approval: matches!(
                             policy.policy_type,
                             PolicyType::ManualApproval
+                        ) || matches!(
+                            policy.eip712_approval_type(),
+                            Some(vault_domain::ApprovalType::ManualApproval)
                         ),
                         scope,
                         token_address: asset.as_ref().and_then(asset_token_address),
@@ -796,6 +799,7 @@ fn relay_policy_limits(policy: &SpendingPolicy) -> RelayPolicyLimits {
                 ..Default::default()
             }
         }
+        PolicyType::Eip712Signing => RelayPolicyLimits::default(),
     }
 }
 
@@ -834,6 +838,16 @@ fn policy_metadata(
     }
     if let Some(chain_id) = chain_id {
         metadata.insert("chainId".to_string(), chain_id.to_string());
+    }
+    if let Some(approval_type) = policy.eip712_approval_type() {
+        metadata.insert(
+            "approvalType".to_string(),
+            match approval_type {
+                vault_domain::ApprovalType::Allow => "allow".to_string(),
+                vault_domain::ApprovalType::ManualApproval => "manual_approval".to_string(),
+                vault_domain::ApprovalType::Deny => "deny".to_string(),
+            },
+        );
     }
     metadata
 }
@@ -875,6 +889,7 @@ fn policy_name(policy: &SpendingPolicy) -> &'static str {
         PolicyType::PerTxMaxCalldataBytes => "per_tx_max_calldata_bytes",
         PolicyType::PerChainMaxGasSpend => "per_chain_max_gas_spend",
         PolicyType::ManualApproval => "manual_approval",
+        PolicyType::Eip712Signing => "eip712_signing",
     }
 }
 
@@ -891,6 +906,7 @@ fn action_name(action: &AgentAction) -> &'static str {
         AgentAction::TempoSessionOpenTransaction { .. } => "tempo_session_open_transaction",
         AgentAction::TempoSessionTopUpTransaction { .. } => "tempo_session_top_up_transaction",
         AgentAction::TempoSessionVoucher { .. } => "tempo_session_voucher",
+        AgentAction::Eip712TypedData { .. } => "eip712_typed_data",
         AgentAction::BroadcastTx { .. } => "broadcast_tx",
     }
 }
@@ -1138,6 +1154,14 @@ mod tests {
                     1_000,
                     EntityScope::All,
                     EntityScope::All,
+                    EntityScope::All,
+                )
+                .expect("policy");
+            }
+            PolicyType::Eip712Signing => {
+                return SpendingPolicy::new_eip712_signing(
+                    1,
+                    vault_domain::ApprovalType::ManualApproval,
                     EntityScope::All,
                 )
                 .expect("policy");

@@ -568,6 +568,7 @@ async fn add_policy_rejects_invalid_policy_payloads() {
         recipients: EntityScope::All,
         assets: EntityScope::All,
         networks: EntityScope::All,
+        approval_type: None,
         enabled: true,
     };
     let err = daemon
@@ -590,6 +591,7 @@ async fn add_policy_rejects_invalid_policy_payloads() {
         recipients: EntityScope::Set(BTreeSet::new()),
         assets: EntityScope::All,
         networks: EntityScope::All,
+        approval_type: None,
         enabled: true,
     };
     let err = daemon
@@ -612,6 +614,7 @@ async fn add_policy_rejects_invalid_policy_payloads() {
         recipients: EntityScope::All,
         assets: EntityScope::Set(BTreeSet::new()),
         networks: EntityScope::All,
+        approval_type: None,
         enabled: true,
     };
     let err = daemon

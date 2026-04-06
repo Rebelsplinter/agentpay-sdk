@@ -796,6 +796,49 @@ where
                         }
                     }
                 }
+                PolicyDecision::Deny(PolicyError::Eip712ManualApprovalRequired { policy_id, .. }) => {
+                    let payload_hash = payload_hash_hex(&request.payload);
+                    // Read the relay secret before creating or mutating approval state so a
+                    // poisoned lock fails this request cleanly instead of silently dropping the
+                    // secure approval link.
+                    let relay_private_key_hex = self
+                        .relay_private_key_hex
+                        .read()
+                        .map_err(|_| DaemonError::LockPoisoned)?
+                        .clone();
+                    match self.resolve_manual_approval_request(
+                        &agent_key,
+                        &payload_action,
+                        &payload_hash,
+                        policy_id.into_iter().collect(),
+                        now,
+                    )? {
+                        ManualApprovalResolution::Approved(request_id) => request_id,
+                        ManualApprovalResolution::Pending {
+                            approval_request_id,
+                            relay_config,
+                        } => {
+                            let frontend_url = manual_approval_capability_token(
+                                &relay_private_key_hex,
+                                approval_request_id,
+                            )
+                                .ok()
+                                .and_then(|approval_capability| {
+                                    manual_approval_frontend_url(
+                                        &relay_config,
+                                        approval_request_id,
+                                        &approval_capability,
+                                    )
+                                });
+                            self.persist_or_revert(backup)?;
+                            return Err(DaemonError::ManualApprovalRequired {
+                                approval_request_id,
+                                relay_url: relay_config.relay_url.clone(),
+                                frontend_url,
+                            });
+                        }
+                    }
+                }
                 PolicyDecision::Deny(err) => return Err(DaemonError::Policy(err)),
             };
             let vault_key = self
@@ -831,7 +874,8 @@ where
                 | AgentAction::Eip3009ReceiveWithAuthorization { .. }
                 | AgentAction::TempoSessionOpenTransaction { .. }
                 | AgentAction::TempoSessionTopUpTransaction { .. }
-                | AgentAction::TempoSessionVoucher { .. } => {
+                | AgentAction::TempoSessionVoucher { .. }
+                | AgentAction::Eip712TypedData { .. } => {
                     self.sign_typed_data_action(&vault_key, &payload_action)
                         .await?
                 }
@@ -857,18 +901,20 @@ where
                 self.prune_manual_approval_requests(now)?;
             }
 
-            let event = SpendEvent {
-                agent_key_id: request.agent_key_id,
-                chain_id: payload_action.chain_id(),
-                asset: payload_action.asset(),
-                recipient: payload_action.recipient(),
-                amount_wei: payload_action.amount_wei(),
-                at: now,
-            };
-            self.spend_log
-                .write()
-                .map_err(|_| DaemonError::LockPoisoned)?
-                .push(event);
+            if payload_action.records_spend_event() {
+                let event = SpendEvent {
+                    agent_key_id: request.agent_key_id,
+                    chain_id: payload_action.chain_id(),
+                    asset: payload_action.asset(),
+                    recipient: payload_action.recipient(),
+                    amount_wei: payload_action.amount_wei(),
+                    at: now,
+                };
+                self.spend_log
+                    .write()
+                    .map_err(|_| DaemonError::LockPoisoned)?
+                    .push(event);
+            }
             self.register_replay_id(request.request_id, request.expires_at, now)?;
             self.persist_signed_state_best_effort(&request, &signature, now);
 
@@ -1517,6 +1563,23 @@ fn validate_policy(policy: &SpendingPolicy) -> Result<(), DaemonError> {
             if policy.gas_spend_limit_wei().unwrap_or_default() == 0 {
                 return Err(DaemonError::InvalidPolicy(
                     "max_gas_spend_wei must be greater than zero".to_string(),
+                ));
+            }
+        }
+        vault_domain::PolicyType::Eip712Signing => {
+            if policy.eip712_approval_type().is_none() {
+                return Err(DaemonError::InvalidPolicy(
+                    "approval_type must be set for eip712_signing".to_string(),
+                ));
+            }
+            if !matches!(policy.recipients, vault_domain::EntityScope::All) {
+                return Err(DaemonError::InvalidPolicy(
+                    "eip712_signing recipient scope must be all".to_string(),
+                ));
+            }
+            if !matches!(policy.assets, vault_domain::EntityScope::All) {
+                return Err(DaemonError::InvalidPolicy(
+                    "eip712_signing asset scope must be all".to_string(),
                 ));
             }
         }

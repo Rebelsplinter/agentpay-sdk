@@ -415,6 +415,7 @@ async fn invalid_policy_error_roundtrips_over_xpc() {
         recipients: vault_domain::EntityScope::All,
         assets: vault_domain::EntityScope::All,
         networks: vault_domain::EntityScope::All,
+        approval_type: None,
         enabled: true,
     };
 

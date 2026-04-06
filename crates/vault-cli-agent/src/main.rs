@@ -7,7 +7,7 @@ use serde::Serialize;
 use uuid::Uuid;
 use vault_daemon::{DaemonError, KeyManagerDaemonApi};
 use vault_domain::{
-    AgentAction, BroadcastTx, Eip3009Transfer, EvmAddress, Signature,
+    AgentAction, BroadcastTx, Eip3009Transfer, Eip712TypedData, EvmAddress, Signature,
     TempoSessionOpenTransaction, TempoSessionTopUpTransaction, TempoSessionVoucher,
 };
 use vault_sdk_agent::{AgentOperations, AgentSdk, AgentSdkError};
@@ -145,7 +145,9 @@ enum Commands {
         #[arg(long, value_parser = parse_positive_u128)]
         amount_wei: u128,
     },
-    #[command(about = "Request an EIP-3009 transferWithAuthorization signature through policy checks")]
+    #[command(
+        about = "Request an EIP-3009 transferWithAuthorization signature through policy checks"
+    )]
     Eip3009TransferWithAuthorization {
         #[arg(long, value_parser = parse_positive_u64)]
         network: u64,
@@ -168,7 +170,9 @@ enum Commands {
         #[arg(long)]
         nonce_hex: String,
     },
-    #[command(about = "Request an EIP-3009 receiveWithAuthorization signature through policy checks")]
+    #[command(
+        about = "Request an EIP-3009 receiveWithAuthorization signature through policy checks"
+    )]
     Eip3009ReceiveWithAuthorization {
         #[arg(long, value_parser = parse_positive_u64)]
         network: u64,
@@ -191,7 +195,9 @@ enum Commands {
         #[arg(long)]
         nonce_hex: String,
     },
-    #[command(about = "Request a Tempo session open-transaction digest signature through policy checks")]
+    #[command(
+        about = "Request a Tempo session open-transaction digest signature through policy checks"
+    )]
     TempoSessionOpenTransaction {
         #[arg(long, value_parser = parse_positive_u64)]
         network: u64,
@@ -206,7 +212,9 @@ enum Commands {
         #[arg(long)]
         signing_hash_hex: String,
     },
-    #[command(about = "Request a Tempo session top-up transaction digest signature through policy checks")]
+    #[command(
+        about = "Request a Tempo session top-up transaction digest signature through policy checks"
+    )]
     TempoSessionTopUpTransaction {
         #[arg(long, value_parser = parse_positive_u64)]
         network: u64,
@@ -239,6 +247,13 @@ enum Commands {
         cumulative_amount_wei: u128,
         #[arg(long)]
         signing_hash_hex: String,
+    },
+    #[command(about = "Request an arbitrary EIP-712 typed-data signature through policy checks")]
+    Eip712TypedData {
+        #[arg(long, value_name = "PATH", conflicts_with = "typed_data_json")]
+        typed_data_file: Option<PathBuf>,
+        #[arg(long, value_name = "JSON", conflicts_with = "typed_data_file")]
+        typed_data_json: Option<String>,
     },
     #[command(about = "Submit a raw transaction broadcast request through policy checks")]
     Broadcast {
@@ -318,7 +333,9 @@ fn compact_recoverable_signature_hex(signature: &Signature) -> Option<String> {
     Some(format!("0x{r_hex}{s_hex}{recovery_byte:02x}"))
 }
 
-fn signature_output_parts(signature: &Signature) -> (String, Option<String>, Option<String>, Option<u64>) {
+fn signature_output_parts(
+    signature: &Signature,
+) -> (String, Option<String>, Option<String>, Option<u64>) {
     let signature_hex = compact_recoverable_signature_hex(signature)
         .unwrap_or_else(|| format!("0x{}", hex::encode(&signature.bytes)));
     (
@@ -825,6 +842,61 @@ where
             );
             print_agent_output(&output, output_format, output_target)?;
         }
+        Commands::Eip712TypedData {
+            typed_data_file,
+            typed_data_json,
+        } => {
+            let typed_data_json =
+                resolve_eip712_typed_data_json(typed_data_file.as_deref(), typed_data_json)?;
+            let typed_data = Eip712TypedData { typed_data_json };
+            let chain_id = typed_data.chain_id()?;
+            let primary_type = typed_data.primary_type()?;
+            let counterparty = typed_data
+                .verifying_contract()?
+                .map(|address| address.to_string())
+                .unwrap_or_else(|| "<none>".to_string());
+
+            print_status(
+                "submitting eip712 typed-data signature request",
+                output_format,
+                quiet,
+            );
+            let signature = match await_signature_or_handle_manual_approval(
+                "eip712-typed-data",
+                daemon_socket,
+                output_format,
+                output_target,
+                sdk.eip712_typed_data(typed_data),
+            )
+            .await?
+            {
+                Some(signature) => signature,
+                None => return Ok(CommandRunOutcome::ManualApprovalRequired),
+            };
+            let (signature_hex, r_hex, s_hex, v) = signature_output_parts(&signature);
+            let output = AgentCommandOutput {
+                command: "eip712-typed-data".to_string(),
+                network: chain_id.to_string(),
+                asset: format!("eip712:{primary_type}"),
+                counterparty,
+                amount_wei: "0".to_string(),
+                estimated_max_gas_spend_wei: None,
+                tx_type: None,
+                delegation_enabled: None,
+                signature_hex,
+                r_hex,
+                s_hex,
+                v,
+                raw_tx_hex: None,
+                tx_hash_hex: None,
+            };
+            print_status(
+                "eip712 typed-data signature request signed",
+                output_format,
+                quiet,
+            );
+            print_agent_output(&output, output_format, output_target)?;
+        }
         Commands::Broadcast {
             network,
             nonce,
@@ -969,11 +1041,30 @@ fn agentpay_home_dir() -> Result<PathBuf> {
     }
 
     let Some(home) = std::env::var_os("HOME") else {
-        return Err(
-            anyhow::anyhow!("HOME is not set; use AGENTPAY_HOME to choose config directory").into(),
-        );
+        return Err(anyhow::anyhow!(
+            "HOME is not set; use AGENTPAY_HOME to choose config directory"
+        )
+        .into());
     };
     Ok(PathBuf::from(home).join(".agentpay"))
+}
+
+fn resolve_eip712_typed_data_json(
+    typed_data_file: Option<&Path>,
+    typed_data_json: Option<String>,
+) -> Result<String> {
+    match (typed_data_file, typed_data_json) {
+        (Some(path), None) => std::fs::read_to_string(path).with_context(|| {
+            format!(
+                "failed to read EIP-712 typed-data JSON from {}",
+                path.display()
+            )
+        }),
+        (None, Some(json)) => Ok(json),
+        _ => Err(anyhow::anyhow!(
+            "provide exactly one of --typed-data-file or --typed-data-json"
+        )),
+    }
 }
 
 fn parse_positive_u128(input: &str) -> Result<u128, String> {
@@ -1040,7 +1131,7 @@ mod tests {
     use uuid::Uuid;
     use vault_daemon::DaemonError;
     use vault_domain::{
-        BroadcastTx, EvmAddress, Signature, TempoSessionOpenTransaction,
+        BroadcastTx, Eip712TypedData, EvmAddress, Signature, TempoSessionOpenTransaction,
         TempoSessionTopUpTransaction, TempoSessionVoucher,
     };
     use vault_policy::PolicyError;
@@ -1070,6 +1161,9 @@ mod tests {
         },
         TempoVoucher {
             authorization: TempoSessionVoucher,
+        },
+        Eip712TypedData {
+            typed_data: Eip712TypedData,
         },
         TransferNative {
             chain_id: u64,
@@ -1229,6 +1323,17 @@ mod tests {
                 .lock()
                 .expect("lock")
                 .push(FakeCall::TempoVoucher { authorization });
+            self.result()
+        }
+
+        async fn eip712_typed_data(
+            &self,
+            typed_data: Eip712TypedData,
+        ) -> Result<Signature, AgentSdkError> {
+            self.calls
+                .lock()
+                .expect("lock")
+                .push(FakeCall::Eip712TypedData { typed_data });
             self.result()
         }
 
@@ -1725,6 +1830,24 @@ mod tests {
     }
 
     #[test]
+    fn canonical_eip712_typed_data_command_is_accepted() {
+        let cli = Cli::try_parse_from([
+            "agentpay-agent",
+            "--agent-key-id",
+            TEST_AGENT_KEY_ID,
+            "--agent-auth-token",
+            "test-auth-token",
+            "--daemon-socket",
+            "/tmp/agentpay.sock",
+            "eip712-typed-data",
+            "--typed-data-json",
+            r#"{"types":{"EIP712Domain":[{"name":"name","type":"string"},{"name":"version","type":"string"},{"name":"chainId","type":"uint256"},{"name":"verifyingContract","type":"address"}],"Mail":[{"name":"contents","type":"string"}]},"primaryType":"Mail","domain":{"name":"AgentPay Test","version":"1","chainId":1,"verifyingContract":"0x1111111111111111111111111111111111111111"},"message":{"contents":"hello"}}"#,
+        ])
+        .expect("parse");
+        assert!(matches!(cli.command, Commands::Eip712TypedData { .. }));
+    }
+
+    #[test]
     fn canonical_broadcast_command_is_accepted() {
         let cli = Cli::try_parse_from([
             "agentpay-agent",
@@ -2067,8 +2190,7 @@ mod tests {
         );
         let eip3009_transfer_json = read_file(&eip3009_transfer_output);
         assert!(
-            eip3009_transfer_json
-                .contains("\"command\": \"eip3009-transfer-with-authorization\"")
+            eip3009_transfer_json.contains("\"command\": \"eip3009-transfer-with-authorization\"")
         );
         fs::remove_file(&eip3009_transfer_output).expect("cleanup eip3009 transfer");
 
@@ -2125,8 +2247,7 @@ mod tests {
         );
         let eip3009_receive_json = read_file(&eip3009_receive_output);
         assert!(
-            eip3009_receive_json
-                .contains("\"command\": \"eip3009-receive-with-authorization\"")
+            eip3009_receive_json.contains("\"command\": \"eip3009-receive-with-authorization\"")
         );
         fs::remove_file(&eip3009_receive_output).expect("cleanup eip3009 receive");
 
@@ -2184,9 +2305,8 @@ mod tests {
             chain_id: 4217,
             token: token.clone(),
             recipient: to.clone(),
-            channel_id_hex:
-                "0x2222222222222222222222222222222222222222222222222222222222222222"
-                    .to_string(),
+            channel_id_hex: "0x2222222222222222222222222222222222222222222222222222222222222222"
+                .to_string(),
             additional_deposit_wei: 1_000_000,
             signing_hash_hex: "0x3333333333333333333333333333333333333333333333333333333333333333"
                 .to_string(),
@@ -2234,9 +2354,8 @@ mod tests {
                 .expect("escrow"),
             token: token.clone(),
             recipient: to.clone(),
-            channel_id_hex:
-                "0x2222222222222222222222222222222222222222222222222222222222222222"
-                    .to_string(),
+            channel_id_hex: "0x2222222222222222222222222222222222222222222222222222222222222222"
+                .to_string(),
             amount_wei: 1_000_000,
             cumulative_amount_wei: 1_000_000,
             signing_hash_hex: "0x3333333333333333333333333333333333333333333333333333333333333333"
@@ -2274,6 +2393,65 @@ mod tests {
         let tempo_voucher_json = read_file(&tempo_voucher_output);
         assert!(tempo_voucher_json.contains("\"command\": \"tempo-session-voucher\""));
         fs::remove_file(&tempo_voucher_output).expect("cleanup tempo voucher");
+
+        let eip712_output = temp_path("eip712-output", "json");
+        let eip712_ops = FakeAgentOps {
+            calls: Mutex::new(Vec::new()),
+            outcome: FakeOutcome::Signature(sample_signature()),
+        };
+        let eip712_typed_data = Eip712TypedData {
+            typed_data_json: r#"{
+  "types": {
+    "EIP712Domain": [
+      { "name": "name", "type": "string" },
+      { "name": "version", "type": "string" },
+      { "name": "chainId", "type": "uint256" },
+      { "name": "verifyingContract", "type": "address" }
+    ],
+    "Mail": [
+      { "name": "contents", "type": "string" }
+    ]
+  },
+  "primaryType": "Mail",
+  "domain": {
+    "name": "AgentPay Test",
+    "version": "1",
+    "chainId": 1,
+    "verifyingContract": "0x1111111111111111111111111111111111111111"
+  },
+  "message": {
+    "contents": "hello"
+  }
+}"#
+            .to_string(),
+        };
+        let outcome = runtime
+            .block_on(run_command(
+                Commands::Eip712TypedData {
+                    typed_data_file: None,
+                    typed_data_json: Some(eip712_typed_data.typed_data_json.clone()),
+                },
+                true,
+                &daemon_socket,
+                OutputFormat::Json,
+                &OutputTarget::File {
+                    path: eip712_output.clone(),
+                    overwrite: false,
+                },
+                &eip712_ops,
+            ))
+            .expect("eip712 run");
+        assert_eq!(outcome, CommandRunOutcome::Completed);
+        assert_eq!(
+            eip712_ops.calls.lock().expect("lock").as_slice(),
+            &[FakeCall::Eip712TypedData {
+                typed_data: eip712_typed_data.clone(),
+            }]
+        );
+        let eip712_json = read_file(&eip712_output);
+        assert!(eip712_json.contains("\"command\": \"eip712-typed-data\""));
+        assert!(eip712_json.contains("\"asset\": \"eip712:Mail\""));
+        fs::remove_file(&eip712_output).expect("cleanup eip712");
 
         let broadcast_output = temp_path("broadcast-output", "json");
         let broadcast_ops = FakeAgentOps {

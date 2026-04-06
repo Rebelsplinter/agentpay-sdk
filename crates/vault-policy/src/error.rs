@@ -86,4 +86,11 @@ pub enum PolicyError {
         max_amount_wei: u128,
         requested_amount_wei: u128,
     },
+    #[error("policy {policy_id} rejected request: eip712 signing is denied")]
+    Eip712SigningDenied { policy_id: Uuid },
+    #[error("eip712 signing requires manual approval{policy_suffix}")]
+    Eip712ManualApprovalRequired {
+        policy_id: Option<Uuid>,
+        policy_suffix: String,
+    },
 }

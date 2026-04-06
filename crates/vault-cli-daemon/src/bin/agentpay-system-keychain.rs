@@ -136,7 +136,7 @@ fn replace_generic_password(
     password_stdin: bool,
 ) -> Result<()> {
     use security_framework::os::macos::keychain::SecKeychain;
-    use security_framework_sys::base::errSecItemNotFound;
+    use security_framework_sys::base::{errSecAuthFailed, errSecItemNotFound};
 
     if !password_stdin {
         bail!("replace-generic-password requires --password-stdin");
@@ -155,6 +155,7 @@ fn replace_generic_password(
         match keychain.find_generic_password(&service, &account) {
             Ok((_existing_password, item)) => item.delete(),
             Err(error) if error.code() == errSecItemNotFound => {}
+            Err(error) if error.code() == errSecAuthFailed => {}
             Err(error) => {
                 return Err(error).with_context(|| {
                     format!(

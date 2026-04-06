@@ -9,7 +9,52 @@ import test from 'node:test';
 const scriptPath = path.join(process.cwd(), 'scripts', 'installer.sh');
 const systemPath = process.env.PATH ?? '';
 const pathShimMarker = '# agentpay-sdk one-click PATH shim';
-const darwinTest = process.platform === 'darwin' ? test : test.skip;
+
+function currentBundlePlatform() {
+  return process.platform === 'darwin' ? 'macos' : process.platform === 'linux' ? 'linux' : process.platform;
+}
+
+function currentBundleArch() {
+  return process.arch === 'x64' ? 'x64' : process.arch === 'arm64' ? 'arm64' : process.arch;
+}
+
+function runtimeEntriesForPlatform(platform) {
+  const entries = new Map([
+    [
+      'agentpay-daemon',
+      '#!/usr/bin/env bash\nset -euo pipefail\necho "fake agentpay-daemon $*"\n',
+    ],
+    [
+      'agentpay-admin',
+      '#!/usr/bin/env bash\nset -euo pipefail\necho "fake agentpay-admin $*"\n',
+    ],
+    [
+      'agentpay-agent',
+      '#!/usr/bin/env bash\nset -euo pipefail\necho "fake agentpay-agent $*"\n',
+    ],
+  ]);
+
+  if (platform === 'macos') {
+    entries.set(
+      'agentpay-system-keychain',
+      '#!/usr/bin/env bash\nset -euo pipefail\necho "fake agentpay-system-keychain $*"\n',
+    );
+    entries.set(
+      'run-agentpay-daemon.sh',
+      '#!/usr/bin/env bash\nset -euo pipefail\necho "fake run-agentpay-daemon $*"\n',
+    );
+    entries.set(
+      'install-user-daemon.sh',
+      '#!/usr/bin/env bash\nset -euo pipefail\necho "fake install-user-daemon $*"\n',
+    );
+    entries.set(
+      'uninstall-user-daemon.sh',
+      '#!/usr/bin/env bash\nset -euo pipefail\necho "fake uninstall-user-daemon $*"\n',
+    );
+  }
+
+  return entries;
+}
 
 function makeTempDir(prefix) {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -20,7 +65,15 @@ function writeExecutable(filePath, contents) {
   fs.chmodSync(filePath, 0o755);
 }
 
-async function createFakeBundle(bundleDir, { omit = [], omitAgentTemplates = [] } = {}) {
+async function createFakeBundle(
+  bundleDir,
+  {
+    omit = [],
+    omitAgentTemplates = [],
+    platform = currentBundlePlatform(),
+    arch = currentBundleArch(),
+  } = {},
+) {
   await fsp.mkdir(path.join(bundleDir, 'app', 'dist'), { recursive: true });
   await fsp.mkdir(path.join(bundleDir, 'app', 'node_modules'), { recursive: true });
   await fsp.mkdir(path.join(bundleDir, 'runtime', 'bin'), { recursive: true });
@@ -34,8 +87,8 @@ async function createFakeBundle(bundleDir, { omit = [], omitAgentTemplates = [] 
       {
         packageName: '@worldlibertyfinancial/agentpay-sdk',
         version: '0.0.0-test',
-        platform: 'darwin',
-        arch: process.arch,
+        platform,
+        arch,
         bundleFormatVersion: 1,
       },
       null,
@@ -60,36 +113,7 @@ async function createFakeBundle(bundleDir, { omit = [], omitAgentTemplates = [] 
     'utf8',
   );
 
-  const runtimeEntries = new Map([
-    [
-      'agentpay-daemon',
-      '#!/usr/bin/env bash\nset -euo pipefail\necho "fake agentpay-daemon $*"\n',
-    ],
-    [
-      'agentpay-admin',
-      '#!/usr/bin/env bash\nset -euo pipefail\necho "fake agentpay-admin $*"\n',
-    ],
-    [
-      'agentpay-agent',
-      '#!/usr/bin/env bash\nset -euo pipefail\necho "fake agentpay-agent $*"\n',
-    ],
-    [
-      'agentpay-system-keychain',
-      '#!/usr/bin/env bash\nset -euo pipefail\necho "fake agentpay-system-keychain $*"\n',
-    ],
-    [
-      'run-agentpay-daemon.sh',
-      '#!/usr/bin/env bash\nset -euo pipefail\necho "fake run-agentpay-daemon $*"\n',
-    ],
-    [
-      'install-user-daemon.sh',
-      '#!/usr/bin/env bash\nset -euo pipefail\necho "fake install-user-daemon $*"\n',
-    ],
-    [
-      'uninstall-user-daemon.sh',
-      '#!/usr/bin/env bash\nset -euo pipefail\necho "fake uninstall-user-daemon $*"\n',
-    ],
-  ]);
+  const runtimeEntries = runtimeEntriesForPlatform(platform);
 
   for (const [entry, contents] of runtimeEntries) {
     if (omit.includes(entry)) {
@@ -150,6 +174,26 @@ function installFakeXattr(binDir, logPath) {
     `#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\\n' "$*" >> ${JSON.stringify(logPath)}
+`,
+  );
+}
+
+function installFakeUname(binDir, { kernelName, machine }) {
+  writeExecutable(
+    path.join(binDir, 'uname'),
+    `#!/usr/bin/env bash
+set -euo pipefail
+case "\${1:-}" in
+  -s)
+    echo ${JSON.stringify(kernelName)}
+    ;;
+  -m)
+    echo ${JSON.stringify(machine)}
+    ;;
+  *)
+    echo ${JSON.stringify(kernelName)}
+    ;;
+esac
 `,
   );
 }
@@ -294,7 +338,7 @@ test('installer.sh exposes a stable help entrypoint', () => {
   assert.equal(result.stderr, '');
 });
 
-darwinTest('installer can complete a fresh bundle-based install and rerun without duplicating shell exports', async () => {
+test('installer can complete a fresh bundle-based install and rerun without duplicating shell exports', async () => {
   const sandboxDir = makeTempDir('agentpay-setup-test-');
   const homeDir = path.join(sandboxDir, 'home');
   const fakeBinDir = path.join(sandboxDir, 'fake-bin');
@@ -343,9 +387,11 @@ darwinTest('installer can complete a fresh bundle-based install and rerun withou
   assert.ok(fs.existsSync(path.join(fakeBinDir, 'agentpay')));
   assert.match(fs.readFileSync(path.join(fakeBinDir, 'agentpay'), 'utf8'), new RegExp(pathShimMarker.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'));
   assert.equal(fs.existsSync(path.join(installDir, 'bin')), true);
-  const xattrLog = await fsp.readFile(xattrLogPath, 'utf8');
-  assert.match(xattrLog, /-dr com\.apple\.quarantine/u);
-  assert.match(xattrLog, new RegExp(installDir.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'));
+  if (process.platform === 'darwin') {
+    const xattrLog = await fsp.readFile(xattrLogPath, 'utf8');
+    assert.match(xattrLog, /-dr com\.apple\.quarantine/u);
+    assert.match(xattrLog, new RegExp(installDir.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'));
+  }
 
   const immediateVersion = spawnSync('agentpay', ['--version'], {
     cwd: process.cwd(),
@@ -412,7 +458,7 @@ darwinTest('installer can complete a fresh bundle-based install and rerun withou
   assert.match(zshrc, /alias ll="ls -la"/u);
 });
 
-darwinTest('installer falls back to shell reload instructions when an earlier PATH entry already owns agentpay', async () => {
+test('installer falls back to shell reload instructions when an earlier PATH entry already owns agentpay', async () => {
   const sandboxDir = makeTempDir('agentpay-setup-shim-conflict-');
   const homeDir = path.join(sandboxDir, 'home');
   const fakeBinDir = path.join(sandboxDir, 'fake-bin');
@@ -451,7 +497,7 @@ darwinTest('installer falls back to shell reload instructions when an earlier PA
   assert.deepEqual(manifest.pathShimPaths, []);
 });
 
-darwinTest('installer defaults to ~/.agentpay when no explicit install directory is provided', async () => {
+test('installer defaults to ~/.agentpay when no explicit install directory is provided', async () => {
   const sandboxDir = makeTempDir('agentpay-setup-default-root-');
   const homeDir = path.join(sandboxDir, 'home');
   const fakeBinDir = path.join(sandboxDir, 'fake-bin');
@@ -483,13 +529,12 @@ darwinTest('installer defaults to ~/.agentpay when no explicit install directory
   assert.ok(fs.existsSync(path.join(defaultInstallDir, 'config.json')) === false);
 });
 
-darwinTest('installer falls through to bundle download when published release repo and tag were not injected', async () => {
+test('installer falls through to bundle download when published release repo and tag were not injected', async () => {
   const sandboxDir = makeTempDir('agentpay-setup-release-download-');
   const homeDir = path.join(sandboxDir, 'home');
   const fakeBinDir = path.join(sandboxDir, 'fake-bin');
   const installDir = path.join(sandboxDir, 'install-root');
-  const bundleName =
-    process.arch === 'arm64' ? 'agentpay-sdk-macos-arm64.tar.gz' : 'agentpay-sdk-macos-x64.tar.gz';
+  const bundleName = `agentpay-sdk-${currentBundlePlatform()}-${currentBundleArch()}.tar.gz`;
   const unresolvedBundleUrl =
     `https://github.com/__AGENTPAY_PUBLIC_RELEASE_REPO__/releases/download/__AGENTPAY_PUBLIC_RELEASE_TAG__/${bundleName}`;
   await fsp.mkdir(homeDir, { recursive: true });
@@ -519,7 +564,7 @@ darwinTest('installer falls through to bundle download when published release re
   assert.doesNotMatch(result.stderr, /Installer release metadata was not injected/u);
 });
 
-darwinTest('published installer asset accepts injected release metadata and resolves the default bundle URL', async () => {
+test('published installer asset accepts injected release metadata and resolves the default bundle URL', async () => {
   const sandboxDir = makeTempDir('agentpay-setup-published-installer-');
   const homeDir = path.join(sandboxDir, 'home');
   const fakeBinDir = path.join(sandboxDir, 'fake-bin');
@@ -529,8 +574,7 @@ darwinTest('published installer asset accepts injected release metadata and reso
   const publishedScriptPath = path.join(sandboxDir, 'installer-published.sh');
   const releaseRepo = 'acme/agentpay-sdk';
   const releaseTag = 'v9.9.9';
-  const bundleName =
-    process.arch === 'arm64' ? 'agentpay-sdk-macos-arm64.tar.gz' : 'agentpay-sdk-macos-x64.tar.gz';
+  const bundleName = `agentpay-sdk-${currentBundlePlatform()}-${currentBundleArch()}.tar.gz`;
   const expectedBundleUrl = `https://github.com/${releaseRepo}/releases/download/${releaseTag}/${bundleName}`;
   await fsp.mkdir(homeDir, { recursive: true });
   await fsp.mkdir(fakeBinDir, { recursive: true });
@@ -559,7 +603,75 @@ darwinTest('published installer asset accepts injected release metadata and reso
   assert.ok(fs.existsSync(path.join(installDir, 'bin', 'agentpay')));
 });
 
-darwinTest('installer does not install a Cursor adapter when no cursor workspace is available', async () => {
+test('installer accepts a Linux runtime bundle without macOS-only helper entries', async () => {
+  const sandboxDir = makeTempDir('agentpay-setup-linux-bundle-');
+  const homeDir = path.join(sandboxDir, 'home');
+  const fakeBinDir = path.join(sandboxDir, 'fake-bin');
+  const fixtureBundleDir = path.join(sandboxDir, 'fixture-bundle');
+  const archivePath = path.join(sandboxDir, 'fixture-bundle.tar.gz');
+  const installDir = path.join(sandboxDir, 'install-root');
+  await fsp.mkdir(homeDir, { recursive: true });
+  await fsp.mkdir(fakeBinDir, { recursive: true });
+  await createFakeBundle(fixtureBundleDir, { platform: 'linux', arch: 'x64' });
+  createBundleArchive(fixtureBundleDir, archivePath);
+  installFakeNode(fakeBinDir);
+  installFakeUname(fakeBinDir, { kernelName: 'Linux', machine: 'x86_64' });
+
+  const result = runInstaller({
+    homeDir,
+    installDir,
+    fakeBinDir,
+    input: '',
+    extraEnv: {
+      AGENTPAY_SDK_BUNDLE_URL: `file://${archivePath}`,
+      AGENTPAY_SETUP_ASSUME_DEFAULTS: '1',
+      AGENTPAY_SETUP_INSTALL_SKILLS: 'no',
+      AGENTPAY_SETUP_RUN_ADMIN_SETUP: 'no',
+    },
+  });
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /AgentPay SDK install complete/u);
+  assert.match(result.stdout, /Linux packaged installs currently stop after the precompiled runtime \+ skill setup/u);
+  assert.ok(fs.existsSync(path.join(installDir, 'bin', 'agentpay')));
+  assert.ok(fs.existsSync(path.join(installDir, 'bin', 'agentpay-daemon')));
+  assert.ok(fs.existsSync(path.join(installDir, 'bin', 'agentpay-admin')));
+  assert.ok(fs.existsSync(path.join(installDir, 'bin', 'agentpay-agent')));
+  assert.equal(fs.existsSync(path.join(installDir, 'bin', 'agentpay-system-keychain')), false);
+});
+
+test('installer rejects a runtime bundle built for a different platform', async () => {
+  const sandboxDir = makeTempDir('agentpay-setup-platform-mismatch-');
+  const homeDir = path.join(sandboxDir, 'home');
+  const fakeBinDir = path.join(sandboxDir, 'fake-bin');
+  const fixtureBundleDir = path.join(sandboxDir, 'fixture-bundle');
+  const archivePath = path.join(sandboxDir, 'fixture-bundle.tar.gz');
+  const installDir = path.join(sandboxDir, 'install-root');
+  await fsp.mkdir(homeDir, { recursive: true });
+  await fsp.mkdir(fakeBinDir, { recursive: true });
+  await createFakeBundle(fixtureBundleDir, { platform: 'macos', arch: 'x64' });
+  createBundleArchive(fixtureBundleDir, archivePath);
+  installFakeNode(fakeBinDir);
+  installFakeUname(fakeBinDir, { kernelName: 'Linux', machine: 'x86_64' });
+
+  const result = runInstaller({
+    homeDir,
+    installDir,
+    fakeBinDir,
+    input: '',
+    extraEnv: {
+      AGENTPAY_SDK_BUNDLE_URL: `file://${archivePath}`,
+      AGENTPAY_SETUP_ASSUME_DEFAULTS: '1',
+      AGENTPAY_SETUP_INSTALL_SKILLS: 'no',
+      AGENTPAY_SETUP_RUN_ADMIN_SETUP: 'no',
+    },
+  });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /did not contain a usable AgentPay SDK runtime bundle/u);
+});
+
+test('installer does not install a Cursor adapter when no cursor workspace is available', async () => {
   const sandboxDir = makeTempDir('agentpay-setup-cursor-skip-');
   const neutralCwd = path.join(sandboxDir, 'neutral-cwd');
   const homeDir = path.join(sandboxDir, 'home');
@@ -595,7 +707,7 @@ darwinTest('installer does not install a Cursor adapter when no cursor workspace
   assert.deepEqual(manifest.cursorArtifactPaths, []);
 });
 
-darwinTest('installer auto-installs detected Codex and generic agents skill targets', async () => {
+test('installer auto-installs detected Codex and generic agents skill targets', async () => {
   const sandboxDir = makeTempDir('agentpay-setup-codex-');
   const neutralCwd = path.join(sandboxDir, 'neutral-cwd');
   const homeDir = path.join(sandboxDir, 'home');
@@ -636,7 +748,7 @@ darwinTest('installer auto-installs detected Codex and generic agents skill targ
   );
 });
 
-darwinTest('installer can install all AI integrations when requested explicitly', async () => {
+test('installer can install all AI integrations when requested explicitly', async () => {
   const sandboxDir = makeTempDir('agentpay-setup-skills-defaults-');
   const workspaceDir = path.join(sandboxDir, 'workspace');
   const homeDir = path.join(sandboxDir, 'home');
@@ -692,7 +804,7 @@ darwinTest('installer can install all AI integrations when requested explicitly'
   );
 });
 
-darwinTest('skills-only install tolerates bundles missing newer adapter templates', async () => {
+test('skills-only install tolerates bundles missing newer adapter templates', async () => {
   const sandboxDir = makeTempDir('agentpay-setup-legacy-skills-');
   const workspaceDir = path.join(sandboxDir, 'workspace');
   const homeDir = path.join(sandboxDir, 'home');
@@ -741,7 +853,7 @@ darwinTest('skills-only install tolerates bundles missing newer adapter template
   );
 });
 
-darwinTest('installer fails closed when the bundle is missing a required runtime entry', async () => {
+test('installer fails closed when the bundle is missing a required runtime entry', async () => {
   const sandboxDir = makeTempDir('agentpay-setup-runtime-');
   const homeDir = path.join(sandboxDir, 'home');
   const fakeBinDir = path.join(sandboxDir, 'fake-bin');
@@ -770,7 +882,7 @@ darwinTest('installer fails closed when the bundle is missing a required runtime
   assert.match(result.stderr, /did not contain a usable AgentPay SDK runtime bundle/u);
 });
 
-darwinTest('installer rejects legacy relay setup flags with a clear error', async () => {
+test('installer rejects legacy relay setup flags with a clear error', async () => {
   const sandboxDir = makeTempDir('agentpay-setup-relay-legacy-');
   const homeDir = path.join(sandboxDir, 'home');
   const fakeBinDir = path.join(sandboxDir, 'fake-bin');
@@ -800,7 +912,7 @@ darwinTest('installer rejects legacy relay setup flags with a clear error', asyn
   assert.match(result.stderr, /Relay setup is not part of the one-click installer/u);
 });
 
-darwinTest('installer rejects admin setup in non-interactive mode with a clear message', async () => {
+test('installer rejects admin setup in non-interactive mode with a clear message', async () => {
   const sandboxDir = makeTempDir('agentpay-setup-admin-tty-');
   const homeDir = path.join(sandboxDir, 'home');
   const fakeBinDir = path.join(sandboxDir, 'fake-bin');
@@ -827,10 +939,14 @@ darwinTest('installer rejects admin setup in non-interactive mode with a clear m
   });
 
   assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /requires a local TTY for secure password prompts/u);
+  if (process.platform === 'darwin') {
+    assert.match(result.stderr, /requires a local TTY for secure password prompts/u);
+  } else {
+    assert.match(result.stderr, /is not supported on this platform yet/u);
+  }
 });
 
-darwinTest('installer fails clearly when Homebrew bootstrap would be required without a local TTY', async () => {
+test('installer fails clearly when Homebrew bootstrap would be required without a local TTY', async () => {
   const sandboxDir = makeTempDir('agentpay-setup-homebrew-tty-');
   const homeDir = path.join(sandboxDir, 'home');
   const fakeBinDir = path.join(sandboxDir, 'fake-bin');
@@ -862,7 +978,7 @@ darwinTest('installer fails clearly when Homebrew bootstrap would be required wi
   assert.match(result.stderr, /Install Homebrew manually first/u);
 });
 
-darwinTest('installer can bootstrap Node via Homebrew when node is missing', async () => {
+test('installer can bootstrap Node via Homebrew when node is missing', async () => {
   const sandboxDir = makeTempDir('agentpay-setup-node-brew-');
   const homeDir = path.join(sandboxDir, 'home');
   const fakeBinDir = path.join(sandboxDir, 'fake-bin');

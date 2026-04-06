@@ -43,7 +43,7 @@ function assertNotInvokedViaSudo(
     return;
   }
   throw new Error(
-    `run \`${commandLabel}\` as your normal macOS user, not with sudo; the CLI prompts for sudo internally and running it as root can target the wrong local AgentPay home`,
+    `run \`${commandLabel}\` as your normal local user, not with sudo; the CLI prompts for sudo internally and running it as root can target the wrong local AgentPay home`,
   );
 }
 
@@ -55,8 +55,8 @@ async function promptHidden(query: string, label: string): Promise<string> {
 const sudoSession = createSudoSession({
   promptPassword: async () =>
     await promptHidden(
-      'macOS admin password for sudo (input hidden; required to change local admin chain and token configuration): ',
-      'macOS admin password for sudo',
+      'Local admin password for sudo (input hidden; required to change local admin chain and token configuration): ',
+      'Local admin password for sudo',
     ),
 });
 

@@ -9,8 +9,9 @@ use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 use vault_daemon::{DaemonError, KeyManagerDaemonApi};
 use vault_domain::{
-    AdminSession, AssetId, EntityScope, EvmAddress, ManualApprovalDecision, ManualApprovalRequest,
-    PolicyAttachment, PolicyType, RelayConfig, SpendingPolicy, DEFAULT_MAX_GAS_SPEND_PER_CHAIN_WEI,
+    AdminSession, AgentAction, ApprovalType as DomainApprovalType, AssetId, EntityScope,
+    EvmAddress, ManualApprovalDecision, ManualApprovalRequest, PolicyAttachment, PolicyType,
+    RelayConfig, SpendingPolicy, DEFAULT_MAX_GAS_SPEND_PER_CHAIN_WEI,
 };
 use vault_signer::KeyCreateRequest;
 use vault_transport_unix::{assert_root_owned_daemon_socket_path, UnixDaemonClient};
@@ -95,6 +96,23 @@ enum OutputFormat {
 enum OutputTarget {
     Stdout,
     File { path: PathBuf, overwrite: bool },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ApprovalTypeArg {
+    Allow,
+    ManualApproval,
+    Deny,
+}
+
+impl From<ApprovalTypeArg> for DomainApprovalType {
+    fn from(value: ApprovalTypeArg) -> Self {
+        match value {
+            ApprovalTypeArg::Allow => Self::Allow,
+            ApprovalTypeArg::ManualApproval => Self::ManualApproval,
+            ApprovalTypeArg::Deny => Self::Deny,
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -231,6 +249,16 @@ struct AddManualApprovalPolicyCommandArgs {
 }
 
 #[derive(Debug, Args)]
+struct AddEip712SigningPolicyCommandArgs {
+    #[arg(long, default_value_t = 100u32)]
+    priority: u32,
+    #[arg(long, value_enum, default_value_t = ApprovalTypeArg::ManualApproval)]
+    approval_type: ApprovalTypeArg,
+    #[arg(long, value_parser = parse_positive_u64)]
+    network: Option<u64>,
+}
+
+#[derive(Debug, Args)]
 struct ApproveManualApprovalRequestCommandArgs {
     #[arg(long, value_name = "UUID")]
     approval_request_id: Uuid,
@@ -304,6 +332,8 @@ enum Commands {
         about = "Create a manual-approval policy for matching destination/token/amount requests"
     )]
     AddManualApprovalPolicy(AddManualApprovalPolicyCommandArgs),
+    #[command(about = "Create an EIP-712 signing policy for matching network scopes")]
+    AddEip712SigningPolicy(AddEip712SigningPolicyCommandArgs),
     #[command(about = "List spending policies and inspect policy contents")]
     ListPolicies(ListPoliciesCommandArgs),
     #[command(about = "List manual approval requests")]
@@ -536,6 +566,14 @@ struct ManualApprovalPolicyOutput {
     recipient_scope: String,
 }
 
+#[derive(Debug, Serialize)]
+struct Eip712SigningPolicyOutput {
+    policy_id: String,
+    priority: u32,
+    approval_type: String,
+    network_scope: String,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct DestinationPolicyOverride {
     recipient: EvmAddress,
@@ -674,6 +712,13 @@ struct AddManualApprovalPolicyParams {
     allow_native_eth: bool,
     network: Option<u64>,
     recipient: Option<EvmAddress>,
+}
+
+#[derive(Debug, Clone)]
+struct AddEip712SigningPolicyParams {
+    priority: u32,
+    approval_type: DomainApprovalType,
+    network: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -856,6 +901,22 @@ async fn main() -> Result<()> {
             .await?;
             print_status("manual approval policy created", output_format, cli.quiet);
             print_manual_approval_policy_output(&output, output_format, &output_target)
+        }
+        Commands::AddEip712SigningPolicy(args) => {
+            let params = AddEip712SigningPolicyParams {
+                priority: args.priority,
+                approval_type: args.approval_type.into(),
+                network: args.network,
+            };
+            let output = execute_add_eip712_signing_policy(
+                daemon_api.clone(),
+                &vault_password,
+                params,
+                |message| print_status(message, output_format, cli.quiet),
+            )
+            .await?;
+            print_status("eip712 signing policy created", output_format, cli.quiet);
+            print_eip712_signing_policy_output(&output, output_format, &output_target)
         }
         Commands::ListPolicies(args) => {
             let output = execute_list_policies(
@@ -2495,6 +2556,43 @@ async fn execute_add_manual_approval_policy(
     result
 }
 
+async fn execute_add_eip712_signing_policy(
+    daemon: Arc<dyn KeyManagerDaemonApi>,
+    vault_password: &str,
+    params: AddEip712SigningPolicyParams,
+    mut on_status: impl FnMut(&str),
+) -> Result<Eip712SigningPolicyOutput> {
+    on_status("issuing admin lease");
+    let lease = daemon.issue_lease(vault_password).await?;
+    let mut session = AdminSession {
+        vault_password: vault_password.to_string(),
+        lease,
+    };
+
+    let networks = build_network_scope(params.network);
+    let policy = SpendingPolicy::new_eip712_signing(
+        params.priority,
+        params.approval_type,
+        networks.clone(),
+    )?;
+    let policy_id = policy.id;
+
+    let result = async {
+        on_status("creating eip712 signing policy");
+        daemon.add_policy(&session, policy).await?;
+        Ok(Eip712SigningPolicyOutput {
+            policy_id: policy_id.to_string(),
+            priority: params.priority,
+            approval_type: describe_approval_type(params.approval_type).to_string(),
+            network_scope: describe_network_scope(&networks),
+        })
+    }
+    .await;
+
+    session.vault_password.zeroize();
+    result
+}
+
 async fn execute_list_manual_approval_requests(
     daemon: Arc<dyn KeyManagerDaemonApi>,
     vault_password: &str,
@@ -2871,6 +2969,15 @@ fn describe_policy_type(policy_type: PolicyType) -> &'static str {
         PolicyType::PerTxMaxCalldataBytes => "per_tx_max_calldata_bytes",
         PolicyType::PerChainMaxGasSpend => "per_chain_max_gas_spend",
         PolicyType::ManualApproval => "manual_approval",
+        PolicyType::Eip712Signing => "eip712_signing",
+    }
+}
+
+fn describe_approval_type(approval_type: DomainApprovalType) -> &'static str {
+    match approval_type {
+        DomainApprovalType::Allow => "allow",
+        DomainApprovalType::ManualApproval => "manual_approval",
+        DomainApprovalType::Deny => "deny",
     }
 }
 
@@ -3221,6 +3328,26 @@ fn print_manual_approval_policy_output(
     emit_output(&rendered, target)
 }
 
+fn print_eip712_signing_policy_output(
+    output: &Eip712SigningPolicyOutput,
+    format: OutputFormat,
+    target: &OutputTarget,
+) -> Result<()> {
+    let rendered = match format {
+        OutputFormat::Json => {
+            serde_json::to_string_pretty(output).context("failed to serialize output")?
+        }
+        OutputFormat::Text => vec![
+            format!("Policy ID: {}", output.policy_id),
+            format!("Priority: {}", output.priority),
+            format!("Approval Type: {}", output.approval_type),
+            format!("Networks: {}", output.network_scope),
+        ]
+        .join("\n"),
+    };
+    emit_output(&rendered, target)
+}
+
 fn render_policy_text(policy: &SpendingPolicy) -> String {
     let mut lines = vec![
         format!("Policy ID: {}", policy.id),
@@ -3276,6 +3403,16 @@ fn render_policy_text(policy: &SpendingPolicy) -> String {
             lines.push(format!(
                 "Max Gas Spend (wei): {}",
                 policy.gas_spend_limit_wei().unwrap_or_default()
+            ));
+        }
+        PolicyType::Eip712Signing => {
+            lines.push(format!(
+                "Approval Type: {}",
+                describe_approval_type(
+                    policy
+                        .eip712_approval_type()
+                        .unwrap_or(DomainApprovalType::ManualApproval)
+                )
             ));
         }
     }
@@ -3390,6 +3527,23 @@ fn render_manual_approval_request_text(output: &ManualApprovalRequest) -> String
                 .collect::<Vec<_>>()
                 .join(",")
         ));
+    }
+    if let Ok(Some(primary_type)) = output.action.eip712_primary_type() {
+        lines.push(format!("EIP712 Primary Type: {primary_type}"));
+    }
+    if let Ok(Some(verifying_contract)) = output.action.eip712_verifying_contract() {
+        lines.push(format!("EIP712 Verifying Contract: {}", verifying_contract));
+    }
+    if let Ok(Some(signing_hash)) = output.action.signing_hash() {
+        lines.push(format!("Signing Hash: 0x{}", hex::encode(signing_hash)));
+    }
+    if let AgentAction::Eip712TypedData { typed_data } = &output.action {
+        let rendered_typed_data =
+            serde_json::from_str::<serde_json::Value>(&typed_data.typed_data_json)
+                .ok()
+                .and_then(|value| serde_json::to_string_pretty(&value).ok())
+                .unwrap_or_else(|| typed_data.typed_data_json.clone());
+        lines.push(format!("Typed Data JSON:\n{rendered_typed_data}"));
     }
     lines.join(
         "
@@ -3506,13 +3660,13 @@ mod tests {
         validate_existing_policy_attachments, validate_password, validate_policy_limits,
         validate_tui_vault_password, write_output_file, AddManualApprovalPolicyParams,
         BootstrapParams, Cli, Commands, DecideManualApprovalRequestParams,
-        DestinationPolicyOverride, ExportVaultPrivateKeyParams, ManualApprovalPolicyOutput,
-        OutputFormat, OutputTarget, PolicyLimitConfig, RevokeAgentKeyOutput, RevokeAgentKeyParams,
-        RotateAgentAuthTokenOutput, RotateAgentAuthTokenParams, SetRelayConfigParams,
-        TokenDestinationPolicyOverride, TokenManualApprovalPolicyConfig, TokenPolicyConfig,
-        TokenSelectorConfig, BOOTSTRAP_POLICY_PRIORITY_STRIDE,
-        DEFAULT_BOOTSTRAP_POLICY_PRIORITY_BASE, DESTINATION_OVERRIDE_POLICY_PRIORITY_BASE,
-        POLICY_BUNDLE_PRIORITY_SLOTS,
+        DestinationPolicyOverride, DomainApprovalType, ExportVaultPrivateKeyParams,
+        ManualApprovalPolicyOutput, OutputFormat, OutputTarget, PolicyLimitConfig,
+        RevokeAgentKeyOutput, RevokeAgentKeyParams, RotateAgentAuthTokenOutput,
+        RotateAgentAuthTokenParams, SetRelayConfigParams, TokenDestinationPolicyOverride,
+        TokenManualApprovalPolicyConfig, TokenPolicyConfig, TokenSelectorConfig,
+        BOOTSTRAP_POLICY_PRIORITY_STRIDE, DEFAULT_BOOTSTRAP_POLICY_PRIORITY_BASE,
+        DESTINATION_OVERRIDE_POLICY_PRIORITY_BASE, POLICY_BUNDLE_PRIORITY_SLOTS,
     };
     use crate::{
         shared_config::{
@@ -6030,6 +6184,20 @@ mod tests {
         ])
         .expect("parse get relay config");
         assert!(matches!(get_cli.command, Commands::GetRelayConfig));
+
+        let add_eip712_cli = Cli::try_parse_from([
+            "agentpay-admin",
+            "--daemon-socket",
+            "/tmp/agentpay.sock",
+            "add-eip712-signing-policy",
+            "--approval-type",
+            "manual-approval",
+        ])
+        .expect("parse add eip712 policy");
+        assert!(matches!(
+            add_eip712_cli.command,
+            Commands::AddEip712SigningPolicy(_)
+        ));
     }
 
     #[test]
@@ -6048,6 +6216,20 @@ mod tests {
         assert!(rendered.contains("Type: manual_approval"));
         assert!(rendered.contains("Min Amount (wei): 10"));
         assert!(rendered.contains("Max Amount (wei): 20"));
+    }
+
+    #[test]
+    fn render_policy_text_includes_eip712_approval_type() {
+        let policy = SpendingPolicy::new_eip712_signing(
+            7,
+            DomainApprovalType::ManualApproval,
+            EntityScope::All,
+        )
+        .expect("eip712 policy");
+
+        let rendered = render_policy_text(&policy);
+        assert!(rendered.contains("Type: eip712_signing"));
+        assert!(rendered.contains("Approval Type: manual_approval"));
     }
 
     #[tokio::test]

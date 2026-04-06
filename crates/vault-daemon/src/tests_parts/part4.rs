@@ -3023,6 +3023,207 @@ async fn completed_manual_approval_spend_counts_toward_later_auto_approved_limit
     ));
 }
 
+fn sample_eip712_mail_action(chain_id: u64) -> AgentAction {
+    AgentAction::Eip712TypedData {
+        typed_data: vault_domain::Eip712TypedData {
+            typed_data_json: format!(
+                r#"{{
+  "types": {{
+    "EIP712Domain": [
+      {{ "name": "name", "type": "string" }},
+      {{ "name": "version", "type": "string" }},
+      {{ "name": "chainId", "type": "uint256" }},
+      {{ "name": "verifyingContract", "type": "address" }}
+    ],
+    "Mail": [
+      {{ "name": "contents", "type": "string" }}
+    ]
+  }},
+  "primaryType": "Mail",
+  "domain": {{
+    "name": "AgentPay Test",
+    "version": "1",
+    "chainId": {chain_id},
+    "verifyingContract": "0x1111111111111111111111111111111111111111"
+  }},
+  "message": {{
+    "contents": "hello"
+  }}
+}}"#
+            ),
+        },
+    }
+}
+
+#[tokio::test]
+async fn eip712_defaults_to_manual_approval_and_does_not_record_spend() {
+    let daemon = InMemoryDaemon::new(
+        "vault-password",
+        SoftwareSignerBackend::default(),
+        DaemonConfig::default(),
+    )
+    .expect("daemon");
+
+    let lease = daemon.issue_lease("vault-password").await.expect("lease");
+    let session = AdminSession {
+        vault_password: "vault-password".to_string(),
+        lease,
+    };
+
+    let key = daemon
+        .create_vault_key(&session, KeyCreateRequest::Generate)
+        .await
+        .expect("key");
+    let agent_credentials = daemon
+        .create_agent_key(&session, key.id, PolicyAttachment::AllPolicies)
+        .await
+        .expect("agent");
+
+    let request = sign_request(&agent_credentials, sample_eip712_mail_action(1));
+    let approval_request_id = match daemon.sign_for_agent(request.clone()).await {
+        Err(DaemonError::ManualApprovalRequired {
+            approval_request_id,
+            ..
+        }) => approval_request_id,
+        other => panic!("expected manual approval request, got {other:?}"),
+    };
+
+    daemon
+        .decide_manual_approval_request(
+            &session,
+            approval_request_id,
+            ManualApprovalDecision::Approve,
+            None,
+        )
+        .await
+        .expect("approve request");
+
+    daemon
+        .sign_for_agent(request)
+        .await
+        .expect("approved eip712 request should sign");
+
+    assert!(
+        daemon
+            .spend_log
+            .read()
+            .expect("spend log")
+            .is_empty(),
+        "generic eip712 signing must not create spend log entries"
+    );
+}
+
+#[tokio::test]
+async fn eip712_allow_policy_signs_without_manual_approval() {
+    let daemon = InMemoryDaemon::new(
+        "vault-password",
+        SoftwareSignerBackend::default(),
+        DaemonConfig::default(),
+    )
+    .expect("daemon");
+
+    let lease = daemon.issue_lease("vault-password").await.expect("lease");
+    let session = AdminSession {
+        vault_password: "vault-password".to_string(),
+        lease,
+    };
+
+    let allow_policy = SpendingPolicy::new_eip712_signing(
+        1,
+        vault_domain::ApprovalType::Allow,
+        EntityScope::All,
+    )
+    .expect("policy");
+    daemon
+        .add_policy(&session, allow_policy)
+        .await
+        .expect("add policy");
+
+    let key = daemon
+        .create_vault_key(&session, KeyCreateRequest::Generate)
+        .await
+        .expect("key");
+    let agent_credentials = daemon
+        .create_agent_key(&session, key.id, PolicyAttachment::AllPolicies)
+        .await
+        .expect("agent");
+
+    let signature = daemon
+        .sign_for_agent(sign_request(
+            &agent_credentials,
+            sample_eip712_mail_action(1),
+        ))
+        .await
+        .expect("allow policy should sign");
+
+    assert!(!signature.bytes.is_empty());
+    assert!(
+        daemon
+            .manual_approval_requests
+            .read()
+            .expect("manual approvals")
+            .is_empty()
+    );
+    assert!(
+        daemon
+            .spend_log
+            .read()
+            .expect("spend log")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn eip712_deny_policy_rejects_signing() {
+    let daemon = InMemoryDaemon::new(
+        "vault-password",
+        SoftwareSignerBackend::default(),
+        DaemonConfig::default(),
+    )
+    .expect("daemon");
+
+    let lease = daemon.issue_lease("vault-password").await.expect("lease");
+    let session = AdminSession {
+        vault_password: "vault-password".to_string(),
+        lease,
+    };
+
+    let deny_policy = SpendingPolicy::new_eip712_signing(
+        1,
+        vault_domain::ApprovalType::Deny,
+        EntityScope::All,
+    )
+    .expect("policy");
+    let deny_policy_id = deny_policy.id;
+    daemon
+        .add_policy(&session, deny_policy)
+        .await
+        .expect("add policy");
+
+    let key = daemon
+        .create_vault_key(&session, KeyCreateRequest::Generate)
+        .await
+        .expect("key");
+    let agent_credentials = daemon
+        .create_agent_key(&session, key.id, PolicyAttachment::AllPolicies)
+        .await
+        .expect("agent");
+
+    let err = daemon
+        .sign_for_agent(sign_request(
+            &agent_credentials,
+            sample_eip712_mail_action(1),
+        ))
+        .await
+        .expect_err("deny policy should reject");
+
+    assert!(matches!(
+        err,
+        DaemonError::Policy(PolicyError::Eip712SigningDenied { policy_id })
+            if policy_id == deny_policy_id
+    ));
+}
+
 #[tokio::test]
 async fn completed_manual_approval_spend_counts_toward_later_weekly_limits() {
     let daemon = InMemoryDaemon::new(

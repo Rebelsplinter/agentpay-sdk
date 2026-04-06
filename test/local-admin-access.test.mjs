@@ -129,7 +129,7 @@ test('requireLocalAdminMutationAccess rejects sudo-wrapped root invocations befo
           ensured = true;
         },
       }),
-    /run `agentpay admin token set-chain` as your normal macOS user, not with sudo; the CLI prompts for sudo internally and running it as root can target the wrong local AgentPay home/,
+    /run `agentpay admin token set-chain` as your normal local user, not with sudo; the CLI prompts for sudo internally and running it as root can target the wrong local AgentPay home/,
   );
 
   assert.equal(ensured, false);
@@ -187,7 +187,7 @@ test('requireLocalAdminMutationAccess uses the default sudo detector to reject s
             throw new Error('should not run');
           },
         }),
-      /run `agentpay admin token set-chain` as your normal macOS user, not with sudo; the CLI prompts for sudo internally and running it as root can target the wrong local AgentPay home/,
+      /run `agentpay admin token set-chain` as your normal local user, not with sudo; the CLI prompts for sudo internally and running it as root can target the wrong local AgentPay home/,
     );
   } finally {
     if (originalSudoUid === undefined) {
@@ -225,10 +225,10 @@ test('requireLocalAdminMutationAccess rewrites sudo failures with the command la
       access.requireLocalAdminMutationAccess('agentpay admin token remove', {
         isRoot: () => false,
         ensureRootAccess: async () => {
-          throw new Error('macOS admin password for sudo is required; rerun on a local TTY');
+          throw new Error('Local admin password for sudo is required; rerun on a local TTY');
         },
       }),
-    /agentpay admin token remove requires verified root access before local admin configuration can change: macOS admin password for sudo is required; rerun on a local TTY/,
+    /agentpay admin token remove requires verified root access before local admin configuration can change: Local admin password for sudo is required; rerun on a local TTY/,
   );
 });
 
@@ -331,14 +331,14 @@ test('withDynamicLocalAdminMutationAccess uses the resolved label in access fail
     {
       isRoot: () => false,
       ensureRootAccess: async () => {
-        throw new Error('macOS admin password for sudo is required; rerun on a local TTY');
+        throw new Error('Local admin password for sudo is required; rerun on a local TTY');
       },
     },
   );
 
   await assert.rejects(
     () => wrapped('clear'),
-    /agentpay config agent-auth clear requires verified root access before local admin configuration can change: macOS admin password for sudo is required; rerun on a local TTY/,
+    /agentpay config agent-auth clear requires verified root access before local admin configuration can change: Local admin password for sudo is required; rerun on a local TTY/,
   );
   assert.equal(actionRan, false);
 });
@@ -352,7 +352,7 @@ test('requireLocalAdminMutationAccess fails closed without a local TTY when sudo
   try {
     await assert.rejects(
       () => access.requireLocalAdminMutationAccess('agentpay admin chain add', { isRoot: () => false }),
-      /agentpay admin chain add requires verified root access before local admin configuration can change: macOS admin password for sudo is required; rerun on a local TTY/,
+      /agentpay admin chain add requires verified root access before local admin configuration can change: Local admin password for sudo is required; rerun on a local TTY/,
     );
   } finally {
     if (stdinDescriptor) {
@@ -373,7 +373,7 @@ test('requireLocalAdminMutationAccess rejects whitespace-only root passwords dur
   await withMockedPrompt('   ', async () => {
     await assert.rejects(
       () => access.requireLocalAdminMutationAccess('agentpay admin token remove', { isRoot: () => false }),
-      /agentpay admin token remove requires verified root access before local admin configuration can change: macOS admin password for sudo must not be empty or whitespace/,
+      /agentpay admin token remove requires verified root access before local admin configuration can change: Local admin password for sudo must not be empty or whitespace/,
     );
   });
 });
@@ -384,7 +384,7 @@ test('requireLocalAdminMutationAccess rejects oversized hidden sudo prompt secre
   await withMockedPrompt(oversized, async () => {
     await assert.rejects(
       () => access.requireLocalAdminMutationAccess('agentpay admin token set-chain', { isRoot: () => false }),
-      /agentpay admin token set-chain requires verified root access before local admin configuration can change: macOS admin password for sudo must not exceed 16384 bytes/,
+      /agentpay admin token set-chain requires verified root access before local admin configuration can change: Local admin password for sudo must not exceed 16384 bytes/,
     );
   });
 });
@@ -415,7 +415,7 @@ test('requireLocalAdminMutationAccess accepts a valid hidden prompt without echo
     assert.doesNotMatch(rendered, /root-secret/u);
     assert.match(
       rendered,
-      /macOS admin password for sudo \(input hidden; required to change local admin chain and token configuration\): /u,
+      /Local admin password for sudo \(input hidden; required to change local admin chain and token configuration\): /u,
     );
     assert.match(rendered, /\n/u);
   });

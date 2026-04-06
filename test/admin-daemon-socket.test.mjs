@@ -102,3 +102,34 @@ test('resolveValidatedAdminDaemonSocket adds AGENTPAY_HOME recovery guidance for
     /agentpay admin setup --reuse-existing-wallet/,
   );
 });
+
+test('resolveValidatedAdminDaemonSocket fails fast on Linux when no explicit daemon socket is configured', async () => {
+  const adminDaemonSocket = await loadModule(`${Date.now()}-linux-default-blocked`);
+
+  assert.throws(
+    () =>
+      adminDaemonSocket.resolveValidatedAdminDaemonSocket(undefined, {}, {
+        env: {},
+        platform: 'linux',
+        assertTrustedAdminDaemonSocketPath: () => {
+          throw new Error('should not reach trust validation');
+        },
+      }),
+    /No managed default daemon socket is available on this platform/u,
+  );
+});
+
+test('wrapAdminDaemonSocketTrustError gives Linux-specific recovery guidance', async () => {
+  const adminDaemonSocket = await loadModule(`${Date.now()}-linux-trust-guidance`);
+
+  const error = adminDaemonSocket.wrapAdminDaemonSocketTrustError(
+    "Daemon socket '/tmp/agentpay.sock' must be owned by root",
+    'explicit',
+    {},
+    'linux',
+  );
+
+  assert.match(error.message, /point the command at your existing daemon socket/u);
+  assert.doesNotMatch(error.message, /agentpay admin setup --reuse-existing-wallet/u);
+  assert.match(error.message, /managed `agentpay admin setup` daemon flow is currently macOS-only/u);
+});

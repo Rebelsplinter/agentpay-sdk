@@ -1,3 +1,4 @@
+use alloy_dyn_abi::eip712::TypedData;
 use alloy_primitives::{aliases::U48, Address, U160, U256};
 use alloy_sol_types::{eip712_domain, sol, Eip712Domain, SolCall, SolStruct};
 use serde::{Deserialize, Serialize};
@@ -402,6 +403,80 @@ impl TempoSessionVoucher {
     }
 }
 
+/// Arbitrary EIP-712 typed data payload signed through daemon policy checks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Eip712TypedData {
+    /// Raw typed-data JSON object as provided by the caller.
+    pub typed_data_json: String,
+}
+
+impl Eip712TypedData {
+    fn parse(&self) -> Result<TypedData, DomainError> {
+        let raw = self.typed_data_json.trim();
+        if raw.is_empty() {
+            return Err(DomainError::InvalidTypedDataDomain(
+                "typed_data_json must not be empty".to_string(),
+            ));
+        }
+
+        serde_json::from_str::<TypedData>(raw).map_err(|err| {
+            DomainError::InvalidTypedDataDomain(format!("typed_data_json is invalid: {err}"))
+        })
+    }
+
+    pub fn primary_type(&self) -> Result<String, DomainError> {
+        let typed_data = self.parse()?;
+        let primary_type = typed_data.primary_type.trim().to_string();
+        if primary_type.is_empty() {
+            return Err(DomainError::InvalidTypedDataDomain(
+                "primaryType must not be empty".to_string(),
+            ));
+        }
+        Ok(primary_type)
+    }
+
+    pub fn chain_id(&self) -> Result<u64, DomainError> {
+        let typed_data = self.parse()?;
+        let chain_id = typed_data.domain.chain_id.ok_or_else(|| {
+            DomainError::InvalidTypedDataDomain("domain.chainId is required".to_string())
+        })?;
+        let chain_id = u64::try_from(chain_id).map_err(|_| {
+            DomainError::InvalidTypedDataDomain(
+                "domain.chainId exceeds supported range".to_string(),
+            )
+        })?;
+        if chain_id == 0 {
+            return Err(DomainError::InvalidChainId);
+        }
+        Ok(chain_id)
+    }
+
+    pub fn verifying_contract(&self) -> Result<Option<EvmAddress>, DomainError> {
+        let typed_data = self.parse()?;
+        typed_data
+            .domain
+            .verifying_contract
+            .map(alloy_address_to_evm)
+            .transpose()
+    }
+
+    pub fn signing_hash(&self) -> Result<[u8; 32], DomainError> {
+        let typed_data = self.parse()?;
+        typed_data
+            .eip712_signing_hash()
+            .map(|hash| hash.0)
+            .map_err(|err| DomainError::InvalidTypedDataDomain(err.to_string()))
+    }
+
+    pub fn validate(&self) -> Result<(), DomainError> {
+        let _ = self.primary_type()?;
+        let _ = self.chain_id()?;
+        let _ = self.verifying_contract()?;
+        let _ = self.signing_hash()?;
+        Ok(())
+    }
+}
+
 /// Agent-submitted broadcast transaction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BroadcastTx {
@@ -599,6 +674,11 @@ pub enum AgentAction {
         /// Typed digest payload.
         authorization: TempoSessionVoucher,
     },
+    /// Arbitrary EIP-712 typed data payload.
+    Eip712TypedData {
+        /// Raw typed-data payload.
+        typed_data: Eip712TypedData,
+    },
     /// Raw transaction broadcast request.
     BroadcastTx {
         /// Unsinged tx fields to authorize and sign.
@@ -618,8 +698,11 @@ impl AgentAction {
             Self::Eip3009TransferWithAuthorization { authorization }
             | Self::Eip3009ReceiveWithAuthorization { authorization } => authorization.amount_wei,
             Self::TempoSessionOpenTransaction { authorization } => authorization.deposit_wei,
-            Self::TempoSessionTopUpTransaction { authorization } => authorization.additional_deposit_wei,
+            Self::TempoSessionTopUpTransaction { authorization } => {
+                authorization.additional_deposit_wei
+            }
             Self::TempoSessionVoucher { authorization } => authorization.amount_wei,
+            Self::Eip712TypedData { .. } => 0,
             Self::BroadcastTx { tx } => self.broadcast_effective_amount_wei(tx),
         }
     }
@@ -637,6 +720,7 @@ impl AgentAction {
             Self::TempoSessionOpenTransaction { authorization } => authorization.chain_id,
             Self::TempoSessionTopUpTransaction { authorization } => authorization.chain_id,
             Self::TempoSessionVoucher { authorization } => authorization.chain_id,
+            Self::Eip712TypedData { typed_data } => typed_data.chain_id().unwrap_or_default(),
             Self::BroadcastTx { tx } => tx.chain_id,
         }
     }
@@ -660,7 +744,10 @@ impl AgentAction {
             Self::TempoSessionTopUpTransaction { authorization } => {
                 AssetId::Erc20(authorization.token.clone())
             }
-            Self::TempoSessionVoucher { authorization } => AssetId::Erc20(authorization.token.clone()),
+            Self::TempoSessionVoucher { authorization } => {
+                AssetId::Erc20(authorization.token.clone())
+            }
+            Self::Eip712TypedData { .. } => AssetId::NativeEth,
             Self::BroadcastTx { tx } => self.broadcast_effective_asset(tx),
         }
     }
@@ -677,6 +764,11 @@ impl AgentAction {
             Self::TempoSessionOpenTransaction { authorization } => authorization.recipient.clone(),
             Self::TempoSessionTopUpTransaction { authorization } => authorization.recipient.clone(),
             Self::TempoSessionVoucher { authorization } => authorization.recipient.clone(),
+            Self::Eip712TypedData { typed_data } => typed_data
+                .verifying_contract()
+                .ok()
+                .flatten()
+                .unwrap_or_else(zero_evm_address),
             Self::BroadcastTx { tx } => self.broadcast_effective_recipient(tx),
         }
     }
@@ -727,9 +819,38 @@ impl AgentAction {
             Self::Eip3009ReceiveWithAuthorization { authorization } => {
                 authorization.receive_signing_hash().map(Some)
             }
-            Self::TempoSessionOpenTransaction { authorization } => authorization.signing_hash().map(Some),
-            Self::TempoSessionTopUpTransaction { authorization } => authorization.signing_hash().map(Some),
+            Self::TempoSessionOpenTransaction { authorization } => {
+                authorization.signing_hash().map(Some)
+            }
+            Self::TempoSessionTopUpTransaction { authorization } => {
+                authorization.signing_hash().map(Some)
+            }
             Self::TempoSessionVoucher { authorization } => authorization.signing_hash().map(Some),
+            Self::Eip712TypedData { typed_data } => typed_data.signing_hash().map(Some),
+            _ => Ok(None),
+        }
+    }
+
+    #[must_use]
+    pub fn records_spend_event(&self) -> bool {
+        !matches!(self, Self::Eip712TypedData { .. })
+    }
+
+    #[must_use]
+    pub fn requires_eip712_policy(&self) -> bool {
+        matches!(self, Self::Eip712TypedData { .. })
+    }
+
+    pub fn eip712_primary_type(&self) -> Result<Option<String>, DomainError> {
+        match self {
+            Self::Eip712TypedData { typed_data } => typed_data.primary_type().map(Some),
+            _ => Ok(None),
+        }
+    }
+
+    pub fn eip712_verifying_contract(&self) -> Result<Option<EvmAddress>, DomainError> {
+        match self {
+            Self::Eip712TypedData { typed_data } => typed_data.verifying_contract(),
             _ => Ok(None),
         }
     }
@@ -751,6 +872,7 @@ impl AgentAction {
             Self::TempoSessionOpenTransaction { authorization } => authorization.validate(),
             Self::TempoSessionTopUpTransaction { authorization } => authorization.validate(),
             Self::TempoSessionVoucher { authorization } => authorization.validate(),
+            Self::Eip712TypedData { typed_data } => typed_data.validate(),
             _ => {
                 if self.amount_wei() == 0 {
                     return Err(DomainError::InvalidAmount);
@@ -962,6 +1084,12 @@ fn evm_to_alloy_address(address: &EvmAddress) -> Result<Address, DomainError> {
 fn alloy_address_to_evm(address: alloy_primitives::Address) -> Result<EvmAddress, DomainError> {
     let value = format!("0x{}", hex::encode(address.as_slice()));
     value.parse::<EvmAddress>()
+}
+
+fn zero_evm_address() -> EvmAddress {
+    "0x0000000000000000000000000000000000000000"
+        .parse()
+        .expect("zero address literal must be valid")
 }
 
 fn decode_hex_payload(input: &str) -> Result<Vec<u8>, DomainError> {
