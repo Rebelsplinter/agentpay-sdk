@@ -13,6 +13,7 @@ PUBLIC_RELEASE_TAG="${AGENTPAY_PUBLIC_RELEASE_TAG:-__AGENTPAY_PUBLIC_RELEASE_TAG
 LEGACY_RELAY_MODE="${AGENTPAY_SETUP_RELAY_MODE:-}"
 INSTALLER_MODE_DEFAULT="${AGENTPAY_SETUP_MODE:-full}"
 AUTO_CONTINUE_SECONDS="${AGENTPAY_SETUP_AUTO_CONTINUE_SECONDS:-8}"
+KEY_SEQUENCE_TIMEOUT_SECONDS="${AGENTPAY_SETUP_KEY_SEQUENCE_TIMEOUT_SECONDS:-0.05}"
 NODE_MIN_MAJOR=20
 RETRY_ATTEMPTS=3
 RETRY_DELAY_SECONDS=2
@@ -77,6 +78,12 @@ on_error() {
 }
 
 trap 'on_error $? $LINENO' ERR
+
+configure_bash_compatibility() {
+  if (( BASH_VERSINFO[0] < 4 )); then
+    KEY_SEQUENCE_TIMEOUT_SECONDS="${AGENTPAY_SETUP_KEY_SEQUENCE_TIMEOUT_SECONDS:-1}"
+  fi
+}
 
 usage() {
   cat <<'EOF_USAGE'
@@ -226,7 +233,12 @@ init_prompt_io() {
   fi
 
   if [[ -r /dev/tty ]] && [[ -w /dev/tty ]]; then
-    exec {PROMPT_IN_FD}<>/dev/tty
+    if (( BASH_VERSINFO[0] >= 4 )); then
+      exec {PROMPT_IN_FD}<>/dev/tty
+    else
+      PROMPT_IN_FD=3
+      exec 3<>/dev/tty
+    fi
     PROMPT_OUT_FD="$PROMPT_IN_FD"
     PROMPT_IN="/dev/tty"
     PROMPT_OUT="/dev/tty"
@@ -1502,9 +1514,9 @@ read_skill_target_picker_key() {
   fi
 
   if [[ "$key" == $'\033' ]]; then
-    if IFS= read -r -u "$PROMPT_IN_FD" -s -n 1 -t 0.05 next; then
+    if IFS= read -r -u "$PROMPT_IN_FD" -s -n 1 -t "$KEY_SEQUENCE_TIMEOUT_SECONDS" next; then
       key+="$next"
-      if [[ "$next" == "[" ]] && IFS= read -r -u "$PROMPT_IN_FD" -s -n 1 -t 0.05 next; then
+      if [[ "$next" == "[" ]] && IFS= read -r -u "$PROMPT_IN_FD" -s -n 1 -t "$KEY_SEQUENCE_TIMEOUT_SECONDS" next; then
         key+="$next"
       fi
     fi
@@ -2020,6 +2032,7 @@ cleanup_temp_bundle() {
 main() {
   parse_args "$@"
 
+  configure_bash_compatibility
   init_prompt_io
   validate_installer_modes
 
