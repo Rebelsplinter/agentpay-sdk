@@ -8,13 +8,9 @@ import { fileURLToPath } from 'node:url';
 
 const scriptPath = fileURLToPath(import.meta.url);
 const repoRoot = path.resolve(path.dirname(scriptPath), '..');
-const runtimeBinaries = [
-  'agentpay-daemon',
-  'agentpay-admin',
-  'agentpay-agent',
-  'agentpay-system-keychain',
-];
-const helperScripts = [
+const commonRuntimeBinaries = ['agentpay-daemon', 'agentpay-admin', 'agentpay-agent'];
+const macosRuntimeBinaries = ['agentpay-system-keychain'];
+const macosHelperScripts = [
   'run-agentpay-daemon.sh',
   'install-user-daemon.sh',
   'uninstall-user-daemon.sh',
@@ -60,11 +56,43 @@ function parseArgs(argv) {
   }
 
   if (!options.output) {
-    const archLabel = process.arch === 'arm64' ? 'arm64' : process.arch === 'x64' ? 'x64' : process.arch;
-    options.output = path.join(repoRoot, `agentpay-sdk-macos-${archLabel}.tar.gz`);
+    options.output = path.join(repoRoot, defaultArchiveFileName());
   }
 
   return options;
+}
+
+function bundlePlatformLabel(platform = process.platform) {
+  switch (platform) {
+    case 'darwin':
+      return 'macos';
+    case 'linux':
+      return 'linux';
+    default:
+      die(`the installer bundle is currently built only on macOS or Linux, not ${platform}`);
+  }
+}
+
+function archLabel(arch = process.arch) {
+  return arch === 'arm64' ? 'arm64' : arch === 'x64' ? 'x64' : arch;
+}
+
+function defaultArchiveFileName(platform = process.platform, arch = process.arch) {
+  return `agentpay-sdk-${bundlePlatformLabel(platform)}-${archLabel(arch)}.tar.gz`;
+}
+
+function runtimeBinariesForPlatform(platform = process.platform) {
+  if (platform === 'darwin') {
+    return [...commonRuntimeBinaries, ...macosRuntimeBinaries];
+  }
+  return [...commonRuntimeBinaries];
+}
+
+function helperScriptsForPlatform(platform = process.platform) {
+  if (platform === 'darwin') {
+    return [...macosHelperScripts];
+  }
+  return [];
 }
 
 function assertExists(targetPath, label) {
@@ -112,16 +140,16 @@ function stageProductionNodeModules(packageName, targetDir) {
 }
 
 function main() {
-  if (process.platform !== 'darwin') {
-    die('the installer bundle is currently built on macOS only');
-  }
-
   const { output } = parseArgs(process.argv.slice(2));
   const packageJsonPath = path.join(repoRoot, 'package.json');
   const distDir = path.join(repoRoot, 'dist');
   const cliEntrypoint = path.join(distDir, 'cli.cjs');
   const runtimeDir = path.join(repoRoot, 'target', 'release');
   const skillsDir = path.join(repoRoot, 'skills', 'agentpay-sdk');
+  const runtimeBinaries = runtimeBinariesForPlatform();
+  const helperScripts = helperScriptsForPlatform();
+
+  bundlePlatformLabel();
 
   assertExists(packageJsonPath, 'package.json');
   assertExists(distDir, 'dist output');
@@ -178,8 +206,8 @@ function main() {
     const manifest = {
       packageName: packageJson.name,
       version: packageJson.version,
-      platform: process.platform,
-      arch: process.arch,
+      platform: bundlePlatformLabel(),
+      arch: archLabel(),
       createdAt: new Date().toISOString(),
       bundleFormatVersion: 1,
       files: {

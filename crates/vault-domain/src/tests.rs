@@ -1061,6 +1061,94 @@ fn permit2_and_eip3009_actions_produce_signing_hashes() {
 }
 
 #[test]
+fn generic_eip712_actions_produce_signing_hashes() {
+    let typed_data = Eip712TypedData {
+        typed_data_json: r#"{
+  "types": {
+    "EIP712Domain": [
+      { "name": "name", "type": "string" },
+      { "name": "version", "type": "string" },
+      { "name": "chainId", "type": "uint256" },
+      { "name": "verifyingContract", "type": "address" }
+    ],
+    "Mail": [
+      { "name": "contents", "type": "string" }
+    ]
+  },
+  "primaryType": "Mail",
+  "domain": {
+    "name": "AgentPay Test",
+    "version": "1",
+    "chainId": 1,
+    "verifyingContract": "0x1111111111111111111111111111111111111111"
+  },
+  "message": {
+    "contents": "hello"
+  }
+}"#
+        .to_string(),
+    };
+
+    let action = AgentAction::Eip712TypedData {
+        typed_data: typed_data.clone(),
+    };
+    let signing_hash = action
+        .signing_hash()
+        .expect("eip712 hash")
+        .expect("typed hash");
+
+    assert_ne!(signing_hash, [0u8; 32]);
+    assert_eq!(action.chain_id(), 1);
+    assert_eq!(
+        action
+            .eip712_primary_type()
+            .expect("primary type")
+            .expect("eip712 action"),
+        "Mail"
+    );
+    assert_eq!(
+        action
+            .eip712_verifying_contract()
+            .expect("verifying contract")
+            .expect("verifying contract"),
+        "0x1111111111111111111111111111111111111111"
+            .parse()
+            .expect("contract")
+    );
+}
+
+#[test]
+fn generic_eip712_validation_requires_chain_id() {
+    let typed_data = Eip712TypedData {
+        typed_data_json: r#"{
+  "types": {
+    "EIP712Domain": [
+      { "name": "name", "type": "string" }
+    ],
+    "Mail": [
+      { "name": "contents", "type": "string" }
+    ]
+  },
+  "primaryType": "Mail",
+  "domain": {
+    "name": "AgentPay Test"
+  },
+  "message": {
+    "contents": "hello"
+  }
+}"#
+        .to_string(),
+    };
+
+    let err = AgentAction::Eip712TypedData { typed_data }
+        .validate()
+        .expect_err("missing chainId must fail");
+    assert!(
+        matches!(err, DomainError::InvalidTypedDataDomain(message) if message.contains("chainId"))
+    );
+}
+
+#[test]
 fn permit2_and_eip3009_validation_reject_invalid_inputs() {
     let now = OffsetDateTime::now_utc();
     let base_permit = Permit2Permit {

@@ -7,6 +7,20 @@ import { privateKeyToAccount } from 'viem/accounts';
 
 const walletProfileModulePath = new URL('../src/lib/wallet-profile.ts', import.meta.url);
 
+async function withMockPlatform(platform, fn) {
+  const descriptor = Object.getOwnPropertyDescriptor(process, 'platform');
+  Object.defineProperty(process, 'platform', { value: platform, configurable: true });
+  try {
+    await fn();
+  } finally {
+    if (descriptor) {
+      Object.defineProperty(process, 'platform', descriptor);
+    } else {
+      delete process.platform;
+    }
+  }
+}
+
 function bootstrapSummary(overrides = {}) {
   return {
     sourcePath: '/tmp/bootstrap.json',
@@ -370,6 +384,19 @@ test('resolveWalletProfile rejects expired bootstrap artifacts when they are the
     delete process.env.AGENTPAY_HOME;
     fs.rmSync(tempRoot, { recursive: true, force: true });
   }
+});
+
+test('resolveWalletProfile reports Linux-specific setup guidance when wallet metadata is missing', async () => {
+  await withMockPlatform('linux', async () => {
+    const walletProfile = await import(
+      walletProfileModulePath.href + `?case=${Date.now()}-linux-metadata-missing`
+    );
+
+    assert.throws(
+      () => walletProfile.resolveWalletProfile({}),
+      /managed `agentpay admin setup` flow is currently macOS-only/u,
+    );
+  });
 });
 
 test('resolveWalletProfileWithBalances fetches balances for configured tokens and builtin native assets', async () => {

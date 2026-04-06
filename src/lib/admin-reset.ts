@@ -25,6 +25,7 @@ import {
   LAUNCHD_UNINSTALL_SCRIPT_NAME,
   resolveLaunchDaemonHelperScriptPath,
 } from './launchd-assets.js';
+import { assertMacOsOnlyFeature } from './platform-support.js';
 import { promptHiddenTty } from './hidden-tty-prompt.js';
 import { createSudoSession } from './sudo.js';
 
@@ -981,6 +982,11 @@ async function confirmReset(options: AdminResetOptions): Promise<void> {
 }
 
 async function runAdminReset(options: AdminResetOptions): Promise<void> {
+  assertMacOsOnlyFeature(
+    '`agentpay admin reset`',
+    'The current reset flow uninstalls a root LaunchDaemon and deletes macOS-managed daemon state.',
+  );
+
   assertNotInvokedViaSudo('admin reset');
   await confirmReset(options);
   const showProgress = !options.json;
@@ -1167,6 +1173,11 @@ function printUninstallSummary(result: {
 }
 
 async function runAdminUninstall(options: AdminUninstallOptions): Promise<void> {
+  assertMacOsOnlyFeature(
+    '`agentpay admin uninstall`',
+    'The current uninstall flow removes a root LaunchDaemon and macOS-managed daemon files.',
+  );
+
   assertNotInvokedViaSudo('admin uninstall');
   await confirmUninstall(options);
   const showProgress = !options.json;

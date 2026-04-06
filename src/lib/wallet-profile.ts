@@ -13,6 +13,7 @@ import {
   type BootstrapSetupSummary,
   readBootstrapSetupSummaryFile,
 } from './bootstrap-credentials.js';
+import { isMacOsPlatform } from './platform-support.js';
 
 function presentString(value: string | undefined | null): string | undefined {
   const normalized = value?.trim();
@@ -34,6 +35,14 @@ function deriveWalletAddress(vaultPublicKey: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+function renderWalletProfileRecoveryHint(platform: NodeJS.Platform = process.platform): string {
+  if (isMacOsPlatform(platform)) {
+    return 'rerun `agentpay admin setup` or import a bootstrap file first';
+  }
+
+  return 'the managed `agentpay admin setup` flow is currently macOS-only; provision the wallet on macOS first or point the CLI at existing source-managed wallet metadata';
 }
 
 function findMatchingBootstrapSummary(
@@ -102,9 +111,7 @@ export function resolveWalletProfile(config: WlfiConfig): WalletProfile {
       (artifact.status === 'plaintext' || artifact.status === 'redacted') && !artifact.leaseExpired,
   );
   if (!bootstrapArtifact) {
-    throw new Error(
-      'wallet metadata is unavailable; rerun `agentpay admin setup` or import a bootstrap file first',
-    );
+    throw new Error(`wallet metadata is unavailable; ${renderWalletProfileRecoveryHint()}`);
   }
 
   return walletProfileFromBootstrapSummary(readBootstrapSetupSummaryFile(bootstrapArtifact.path));
@@ -115,9 +122,7 @@ export function resolveWalletAddress(config: WlfiConfig): Address {
   /* c8 ignore next -- explicit-address and derived-address paths are both exercised, but c8 misattributes this nullish expression under --experimental-strip-types */
   const address = presentString(profile.address) ?? deriveWalletAddress(profile.vaultPublicKey);
   if (!address || !isAddress(address)) {
-    throw new Error(
-      'wallet address is unavailable; rerun `agentpay admin setup` or import a bootstrap file first',
-    );
+    throw new Error(`wallet address is unavailable; ${renderWalletProfileRecoveryHint()}`);
   }
 
   return address;

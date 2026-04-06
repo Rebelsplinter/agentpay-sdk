@@ -7,9 +7,9 @@ use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
 use clap::{Parser, ValueEnum};
 use vault_daemon::{DaemonConfig, InMemoryDaemon, PersistentStoreConfig};
-use vault_signer::{SecureEnclaveSignerBackend, SoftwareSignerBackend};
 #[cfg(target_os = "linux")]
 use vault_signer::LinuxTpmSignerBackend;
+use vault_signer::{SecureEnclaveSignerBackend, SoftwareSignerBackend};
 use vault_transport_unix::UnixDaemonServer;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -709,13 +709,12 @@ fn lock_path(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{
-        acquire_state_file_lock, default_socket_path, default_state_file_path, dispatch_runtime,
-        ensure_file_parent, format_allowed_euids, is_symlink, lock_path, read_secret_from_reader,
-        relay_signer_backend_label, resolve_allowed_peer_euids,
+        acquire_state_file_lock, agentpay_home_dir, default_socket_path, default_state_file_path,
+        dispatch_runtime, ensure_file_parent, format_allowed_euids, is_symlink, lock_path,
+        read_secret_from_reader, relay_signer_backend_label, resolve_allowed_peer_euids,
         resolve_allowed_peer_euids_with_sudo_uid, resolve_socket_path, resolve_state_file_path,
         resolve_vault_password, run_cli_with_runtime, validate_password,
-        validate_signer_backend_runtime, agentpay_home_dir, AllowedPeerEuids, Cli, DaemonRuntime,
-        SignerBackendKind,
+        validate_signer_backend_runtime, AllowedPeerEuids, Cli, DaemonRuntime, SignerBackendKind,
     };
     use anyhow::{anyhow, Result};
     use async_trait::async_trait;
@@ -851,18 +850,15 @@ mod tests {
             tpm_device: PathBuf,
             signer_backend_label: &'static str,
         ) -> Result<()> {
-            self.calls
-                .lock()
-                .expect("lock")
-                .push(RuntimeCall::Tpm {
-                    daemon_socket,
-                    allowed_admin: allowed_peer_euids.admin,
-                    allowed_agent: allowed_peer_euids.agent,
-                    vault_password: vault_password.to_string(),
-                    state_file,
-                    tpm_device,
-                    signer_backend_label,
-                });
+            self.calls.lock().expect("lock").push(RuntimeCall::Tpm {
+                daemon_socket,
+                allowed_admin: allowed_peer_euids.admin,
+                allowed_agent: allowed_peer_euids.agent,
+                vault_password: vault_password.to_string(),
+                state_file,
+                tpm_device,
+                signer_backend_label,
+            });
             match self.fail_message {
                 Some(message) => Err(anyhow!(message)),
                 None => Ok(()),
@@ -1318,8 +1314,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn assert_allowed_directory_owner_rejects_non_root_owner_for_root_runtime() {
-        let err = super::assert_allowed_directory_owner(Path::new("/tmp/agentpay"), 501, 0, "state")
-            .expect_err("root runtime must reject non-root owner");
+        let err =
+            super::assert_allowed_directory_owner(Path::new("/tmp/agentpay"), 501, 0, "state")
+                .expect_err("root runtime must reject non-root owner");
 
         assert!(err.to_string().contains("must be owned by root"));
     }
@@ -1341,8 +1338,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn assert_allowed_directory_owner_rejects_other_user_for_non_root_runtime() {
-        let err = super::assert_allowed_directory_owner(Path::new("/tmp/agentpay"), 502, 501, "state")
-            .expect_err("non-root runtime must reject another user's directory");
+        let err =
+            super::assert_allowed_directory_owner(Path::new("/tmp/agentpay"), 502, 501, "state")
+                .expect_err("non-root runtime must reject another user's directory");
 
         assert!(err
             .to_string()

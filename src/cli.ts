@@ -46,6 +46,7 @@ import {
   runAdminSetupCli,
   runAdminTuiCli,
 } from './lib/admin-setup.js';
+import { assertMacOsOnlyFeature } from './lib/platform-support.js';
 import { resolveAgentAuthToken } from './lib/agent-auth.js';
 import { clearAgentAuthToken } from './lib/agent-auth-clear.js';
 import { migrateLegacyAgentAuthToken } from './lib/agent-auth-migrate.js';
@@ -106,11 +107,13 @@ import {
 import {
   encodeMppAttributionMemo,
   type MppReceipt,
+  parseMppChallengesFromHeaders,
   parseMppChallengeFromHeaders,
   parseMppReceiptFromHeaders,
   isTempoChain,
   resolveMppChainId,
   resolveMppEscrowContract,
+  selectMppChallenge,
   serializeMppCredentialHeader,
 } from './lib/mpp.js';
 import { resolveCliNetworkProfile, resolveCliRpcUrl } from './lib/network-selection.js';
@@ -129,6 +132,7 @@ import {
 } from './lib/http-proxy.js';
 import { resolveWalletBackupPassword, verifyWalletBackupFile } from './lib/wallet-backup.js';
 import { exportEncryptedWalletBackup } from './lib/wallet-backup-admin.js';
+import { applySharedConfigToExistingWallet } from './lib/shared-config-apply.js';
 import {
   formatWalletProfileText,
   resolveWalletAddress,
@@ -1908,7 +1912,6 @@ async function handleTempoSessionStreamResponse(input: {
   response: Response;
   asJson: boolean;
   challenge: ReturnType<typeof parseMppChallengeFromHeaders>;
-  requestInit: RequestInit;
   auth: AgentCommandAuthOptions;
   config: WlfiConfig;
   targetUrl: string;
@@ -2146,9 +2149,9 @@ async function handleTempoSessionStreamResponse(input: {
       cumulativeAmountWei: spentWei > 0n ? spentWei : activeCumulativeAmountWei,
     });
     const closeResponse = await globalThis.fetch(input.targetUrl, {
-      ...input.requestInit,
+      method: 'POST',
       headers: withAuthorizationHeader(
-        input.requestInit.headers,
+        undefined,
         serializeMppCredentialHeader({
           challenge: input.challenge,
           payload: closePayload,
@@ -2922,26 +2925,43 @@ function buildAdminTokenCommand(): Command {
     .option('--per-tx <amount>', 'Default per-transaction policy amount in token units')
     .option('--daily <amount>', 'Default daily policy amount in token units')
     .option('--weekly <amount>', 'Default weekly policy amount in token units')
+    .option('--daemon-socket <path>', 'Daemon unix socket path used when applying the saved policy')
+    .option('--vault-password-stdin', 'Read vault password from stdin when applying to the daemon', false)
+    .option('--non-interactive', 'Disable password prompts; requires --vault-password-stdin', false)
     .option('--json', 'Print JSON output', false)
     .action(
       withLocalAdminMutationAccess(
         'agentpay admin token set-chain',
-        (tokenKey: string, chainKey: string, options) => {
-          const config = readConfig();
+        async (tokenKey: string, chainKey: string, options) => {
+          const originalConfig = readConfig();
           const { symbol, profile } = normalizeTokenChainConfig(
             tokenKey,
             chainKey,
             options,
-            config,
+            originalConfig,
           );
           const updated = saveTokenChainProfile(tokenKey, chainKey, profile, { symbol });
           const resolved = resolveTokenProfile(tokenKey, updated);
           if (!resolved) {
             throw new Error(`failed to save token '${tokenKey}'`);
           }
+          const applied = await applySharedConfigToExistingWallet(originalConfig, updated, {
+            daemonSocket: options.daemonSocket,
+            vaultPasswordStdin: options.vaultPasswordStdin,
+            nonInteractive: options.nonInteractive,
+          });
           print(
             {
               saved: describeResolvedToken(resolved),
+              applied:
+                applied.applied && applied.walletSetup
+                  ? {
+                      daemonSocket: applied.daemonSocket,
+                      agentKeyId: applied.walletSetup.agentKeyId,
+                      policyAttachment: applied.walletSetup.policyAttachment,
+                      attachedPolicyIds: applied.walletSetup.attachedPolicyIds,
+                    }
+                  : null,
             },
             options.json,
           );
@@ -3043,10 +3063,16 @@ function normalizeAdminPassthroughArgs(forwarded: string[]): string[] {
 function buildAdminDaemonCommand(): Command {
   return new Command()
     .name('daemon')
-    .description('Daemon launch is managed by agentpay admin setup')
+    .description('Daemon launch is managed by agentpay admin setup on macOS')
     .action(() => {
+      if (process.platform === 'darwin') {
+        throw new Error(
+          'Direct daemon execution is disabled. Use `agentpay admin setup` to install and manage the daemon.',
+        );
+      }
+
       throw new Error(
-        'Direct daemon execution is disabled. Use `agentpay admin setup` to install and manage the daemon.',
+        'Direct daemon execution is disabled. On Linux, use the source-managed daemon directly and pass its socket with `--daemon-socket` or `AGENTPAY_DAEMON_SOCKET`; the managed `agentpay admin setup` flow is macOS-only.',
       );
     });
 }
@@ -3362,7 +3388,7 @@ async function main() {
 
   const agentAuthCommand = configCommand
     .command('agent-auth')
-    .description('Manage the agent auth token in macOS Keychain');
+    .description('Manage the local agent auth token and macOS Keychain-backed storage');
 
   agentAuthCommand
     .command('set')
@@ -3372,6 +3398,11 @@ async function main() {
     .option('--json', 'Print JSON output', false)
     .action(
       withLocalAdminMutationAccess('agentpay config agent-auth set', async (options) => {
+        assertMacOsOnlyFeature(
+          '`agentpay config agent-auth set`',
+          'This command writes the credential into macOS Keychain; on Linux use stdin-based auth flags instead of local Keychain storage.',
+        );
+
         if (options.agentAuthToken && options.agentAuthTokenStdin) {
           throw new Error('--agent-auth-token conflicts with --agent-auth-token-stdin');
         }
@@ -3422,6 +3453,11 @@ async function main() {
       withLocalAdminMutationAccess(
         'agentpay config agent-auth import',
         (inputPath: string, options) => {
+          assertMacOsOnlyFeature(
+            '`agentpay config agent-auth import`',
+            'This command imports the credential into macOS Keychain; on Linux there is no equivalent local Keychain store.',
+          );
+
           if (options.keepSource && options.deleteSource) {
             throw new Error('--keep-source conflicts with --delete-source');
           }
@@ -3490,6 +3526,11 @@ async function main() {
     .option('--json', 'Print JSON output', false)
     .action(
       withLocalAdminMutationAccess('agentpay config agent-auth migrate', (options) => {
+        assertMacOsOnlyFeature(
+          '`agentpay config agent-auth migrate`',
+          'This command migrates plaintext config credentials into macOS Keychain.',
+        );
+
         print(
           migrateLegacyAgentAuthToken({
             agentKeyId: options.agentKeyId,
@@ -3509,6 +3550,11 @@ async function main() {
     .option('--daemon-socket <path>', 'Daemon unix socket path')
     .option('--json', 'Print JSON output', false)
     .action(async (options) => {
+      assertMacOsOnlyFeature(
+        '`agentpay config agent-auth rotate`',
+        'This command stores the rotated credential into macOS Keychain after the Rust admin flow completes.',
+      );
+
       const config = readConfig();
       const agentKeyId = options.agentKeyId
         ? assertAgentKeyId(options.agentKeyId)
@@ -4210,6 +4256,35 @@ async function main() {
 
   addAgentCommandAuthOptions(
     program
+      .command('sign-typed-data')
+      .description('Request an arbitrary EIP-712 typed-data signature through policy checks')
+      .option('--typed-data-file <path>', 'Path to an EIP-712 typed-data JSON file')
+      .option('--typed-data-json <json>', 'Raw EIP-712 typed-data JSON payload'),
+  ).action(async (options) => {
+    const config = readConfig();
+    const typedDataJson = options.typedDataFile
+      ? fs.readFileSync(path.resolve(options.typedDataFile), 'utf8')
+      : typeof options.typedDataJson === 'string'
+        ? options.typedDataJson
+        : null;
+    if (!typedDataJson || (options.typedDataFile && options.typedDataJson)) {
+      throw new Error('Provide exactly one of --typed-data-file or --typed-data-json');
+    }
+
+    const result = await runAgentCommandJson<RustBroadcastOutput>({
+      commandArgs: ['eip712-typed-data', '--typed-data-json', typedDataJson],
+      auth: options,
+      config,
+      asJson: options.json,
+      waitForManualApproval: true,
+    });
+    if (result) {
+      print(result, options.json);
+    }
+  });
+
+  addAgentCommandAuthOptions(
+    program
       .command('broadcast')
       .description('Submit a raw transaction broadcast request through policy checks')
       .requiredOption('--network <name>', 'Network name')
@@ -4453,7 +4528,9 @@ async function main() {
       return;
     }
 
-    const challenge = parseMppChallengeFromHeaders(initialResponse.headers);
+    const challenge = selectMppChallenge(parseMppChallengesFromHeaders(initialResponse.headers), {
+      targetUrl,
+    });
     if (challenge.intent !== 'charge' && challenge.intent !== 'session') {
       throw new Error(
         `agentpay mpp supports charge and session intents (received ${challenge.method}/${challenge.intent})`,
@@ -4702,7 +4779,6 @@ async function main() {
           response: paidResponse,
           asJson: options.json,
           challenge,
-          requestInit,
           auth: options,
           config,
           targetUrl,
@@ -4738,9 +4814,9 @@ async function main() {
           cumulativeAmountWei: activeCumulativeAmountWei,
         });
         const closeResponse = await globalThis.fetch(targetUrl, {
-          ...requestInit,
+          method: 'POST',
           headers: withAuthorizationHeader(
-            requestInit.headers,
+            undefined,
             serializeMppCredentialHeader({
               challenge,
               payload: closePayload,

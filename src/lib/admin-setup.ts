@@ -51,6 +51,7 @@ import {
   resolveWalletBackupPassword,
   writeTemporaryWalletImportKeyFile,
 } from './wallet-backup.js';
+import { assertMacOsOnlyFeature } from './platform-support.js';
 
 const DEFAULT_LAUNCH_DAEMON_LABEL = 'com.agentpay.daemon';
 const DEFAULT_SIGNER_BACKEND = 'software';
@@ -1113,23 +1114,18 @@ async function managedStateAcceptsRequestedVaultPassword(
     daemonSocket,
     stateFile,
   );
-  const tempSocket = assertTrustedRootPlannedDaemonSocketPath(
-    path.join(
-      path.dirname(path.resolve(daemonSocket)),
-      `agentpay-managed-state-probe-${process.pid}-${Date.now()}.sock`,
-    ),
-    'Managed daemon state probe socket',
-  );
   const allowedUid = String(process.getuid?.() ?? process.geteuid?.() ?? 0);
   const probeScript = [
     'set -euo pipefail',
     'vault_password="$(cat)"',
     'daemon_bin="$1"',
     'state_file="$2"',
-    'daemon_socket="$3"',
-    'admin_uid="$4"',
-    'agent_uid="$5"',
-    'signer_backend="$6"',
+    'admin_uid="$3"',
+    'agent_uid="$4"',
+    'signer_backend="$5"',
+    'temp_root="$(mktemp -d "${TMPDIR:-/tmp}/agentpay-managed-state-probe-XXXXXX")"',
+    'trap \'rm -rf "$temp_root"\' EXIT',
+    'daemon_socket="$temp_root/daemon.sock"',
     '"$daemon_bin" \\',
     '  --non-interactive \\',
     '  --vault-password-stdin \\',
@@ -1151,41 +1147,34 @@ async function managedStateAcceptsRequestedVaultPassword(
     'exit 0',
   ].join('\n');
 
-  try {
-    const result = await sudoSession.run(
-      [
-        '/bin/bash',
-        '-lc',
-        probeScript,
-        '--',
-        installPreconditions.daemonBin,
-        stateFile,
-        tempSocket,
-        allowedUid,
-        allowedUid,
-        DEFAULT_SIGNER_BACKEND,
-      ],
-      {
-        stdin: `${vaultPassword}\n`,
-      },
-    );
-    if (result.code === 0) {
-      return true;
-    }
-
-    const combinedOutput = `${result.stderr}\n${result.stdout}`.trim();
-    if (isManagedStatePasswordMismatch(combinedOutput)) {
-      return false;
-    }
-    throw new Error(
-      combinedOutput ||
-        `failed to validate the managed daemon state with the requested vault password (exit code ${result.code})`,
-    );
-  } finally {
-    try {
-      await sudoSession.run(['/bin/rm', '-f', tempSocket]);
-    } catch {}
+  const result = await sudoSession.run(
+    [
+      '/bin/bash',
+      '-lc',
+      probeScript,
+      '--',
+      installPreconditions.daemonBin,
+      stateFile,
+      allowedUid,
+      allowedUid,
+      DEFAULT_SIGNER_BACKEND,
+    ],
+    {
+      stdin: `${vaultPassword}\n`,
+    },
+  );
+  if (result.code === 0) {
+    return true;
   }
+
+  const combinedOutput = `${result.stderr}\n${result.stdout}`.trim();
+  if (isManagedStatePasswordMismatch(combinedOutput)) {
+    return false;
+  }
+  throw new Error(
+    combinedOutput ||
+      `failed to validate the managed daemon state with the requested vault password (exit code ${result.code})`,
+  );
 }
 
 async function assertManagedStateMatchesRequestedVaultPasswordBeforeInstall(
@@ -1455,6 +1444,11 @@ async function installLaunchDaemon(
 }
 
 async function runAdminSetup(options: AdminSetupOptions): Promise<void> {
+  assertMacOsOnlyFeature(
+    '`agentpay admin setup`',
+    'The current setup flow installs a root LaunchDaemon and imports credentials into macOS Keychain.',
+  );
+
   if (options.plan) {
     const plan = createAdminSetupPlan(options);
     printCliPayload(options.json ? plan : formatAdminSetupPlanText(plan), options.json ?? false);
@@ -1515,21 +1509,16 @@ async function runAdminSetup(options: AdminSetupOptions): Promise<void> {
     existingDaemonResponding = true;
     const accepted = await daemonAcceptsVaultPassword(config, daemonSocket, vaultPassword);
     if (accepted) {
-      if (installIsCurrent) {
-        daemon = {
-          label: DEFAULT_LAUNCH_DAEMON_LABEL,
-          runnerPath: installedPaths?.runnerPath ?? resolveManagedLaunchDaemonPaths().runnerPath,
-          daemonBin: installedPaths?.daemonBin ?? resolveManagedLaunchDaemonPaths().daemonBin,
-          stateFile,
-          keychainAccount: os.userInfo().username,
-          keychainService: DAEMON_PASSWORD_KEYCHAIN_SERVICE,
-        };
-        existingDaemonProgress.succeed('Existing daemon is ready and accepted the vault password');
-      } else {
-        existingDaemonProgress.succeed(
-          'Existing daemon is ready but the managed install is stale; setup will refresh it',
-        );
-      }
+      installIsCurrent = true;
+      daemon = {
+        label: DEFAULT_LAUNCH_DAEMON_LABEL,
+        runnerPath: installedPaths?.runnerPath ?? resolveManagedLaunchDaemonPaths().runnerPath,
+        daemonBin: installedPaths?.daemonBin ?? resolveManagedLaunchDaemonPaths().daemonBin,
+        stateFile,
+        keychainAccount: os.userInfo().username,
+        keychainService: DAEMON_PASSWORD_KEYCHAIN_SERVICE,
+      };
+      existingDaemonProgress.succeed('Existing daemon is ready and accepted the vault password');
     } else {
       existingDaemonRejectedPassword = true;
       existingDaemonProgress.succeed(
@@ -1957,6 +1946,11 @@ export function buildAdminSetupBootstrapInvocation(input: {
 }
 
 async function runAdminTui(options: AdminTuiOptions): Promise<void> {
+  assertMacOsOnlyFeature(
+    '`agentpay admin tui`',
+    'The current TUI flow refreshes local wallet credentials through macOS Keychain-backed setup helpers.',
+  );
+
   const config = backfillPersistedWalletProfileForTui(readConfig());
 
   const daemonSocket = options.daemonSocket ? resolveDaemonSocket(options.daemonSocket) : undefined;

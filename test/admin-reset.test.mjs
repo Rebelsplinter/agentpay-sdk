@@ -30,6 +30,20 @@ async function withIsolatedHome(fn) {
   }
 }
 
+async function withMockPlatform(platform, fn) {
+  const descriptor = Object.getOwnPropertyDescriptor(process, 'platform');
+  Object.defineProperty(process, 'platform', { value: platform, configurable: true });
+  try {
+    await fn();
+  } finally {
+    if (descriptor) {
+      Object.defineProperty(process, 'platform', descriptor);
+    } else {
+      delete process.platform;
+    }
+  }
+}
+
 async function withMockedPrompt(answer, fn, options = {}) {
   const originalCreateInterface = readline.createInterface;
   const stdinDescriptor = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
@@ -625,6 +639,28 @@ test('managedDaemonResetArtifactPaths includes the relay daemon token file', asy
     '/Library/AgentPay/run/daemon.sock',
     '/var/db/agentpay/relay-daemon-token',
   ]);
+});
+
+test('runAdminResetCli fails fast on Linux before entering the macOS-only managed reset flow', async () => {
+  await withMockPlatform('linux', async () => {
+    const reset = await import(`${modulePath.href}?case=${Date.now()}-linux-reset-guard`);
+
+    await assert.rejects(
+      () => reset.runAdminResetCli(['--yes', '--non-interactive']),
+      /`agentpay admin reset` is currently supported only on macOS/u,
+    );
+  });
+});
+
+test('runAdminUninstallCli fails fast on Linux before entering the macOS-only managed uninstall flow', async () => {
+  await withMockPlatform('linux', async () => {
+    const reset = await import(`${modulePath.href}?case=${Date.now()}-linux-uninstall-guard`);
+
+    await assert.rejects(
+      () => reset.runAdminUninstallCli(['--yes', '--non-interactive']),
+      /`agentpay admin uninstall` is currently supported only on macOS/u,
+    );
+  });
 });
 
 test('runAdminResetCli enforces confirmation in non-interactive and prompt-abort paths', async () => {

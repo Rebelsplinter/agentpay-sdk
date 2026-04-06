@@ -2,14 +2,20 @@
 
 All notable changes to AgentPay SDK are documented in this file.
 
-## [0.2.1] - 2026-03-30
+## [0.3.0] - 2026-04-05
 
-- fixed Tempo session signing hash: `getSignPayload()` is now called without `from`, avoiding Keychain-wrapped hashes (`0x04 || txHash || address`) that broke server-side `ecrecover` for session open and top-up transactions
-- fixed MPP session close to forward the original request method, headers, and body instead of hardcoding an empty `POST`
-- fixed `admin setup` to detect stale managed launchd installs: when the daemon responds but the on-disk managed binaries are outdated, setup now refreshes the install instead of skipping it
-- changed managed-state probe socket from a `mkdtemp`-based path to a sibling file alongside the daemon socket, cleaned up via `sudo rm` instead of `fs.rmSync`
-- added `security delete-generic-password` before `replace-generic-password` in the launchd install script to avoid duplicate keychain entries
-- simplified sudo `writeChildStdin` by removing redundant `close`/`childClose` event listeners
+- added `agentpay sign-typed-data` for arbitrary EIP-712 typed-data signatures through daemon policy checks
+- added `agentpay admin add-eip712-signing-policy` with `allow`, `manual-approval`, and `deny` modes scoped by network
+- generic EIP-712 signing now defaults to manual approval and is evaluated separately from spend-limit accounting
+- improved `agentpay mpp` session flows by selecting the correct challenge when a server returns multiple MPP challenges and by handling `payment-need-voucher` stream control events in text mode with automatic voucher/top-up follow-up
+- added Tempo session demo tooling with `pnpm example:mpp:session-demo`, `pnpm example:mpp:session-server`, and expanded local server examples for persisted session open, reuse, and close flows
+- improved source-install and admin-setup ergonomics: source installs now support macOS and Linux, Windows source installs fail fast with a JavaScript-only fallback hint, and runtime refresh still reuses the existing wallet through `agentpay admin setup --reuse-existing-wallet`
+- added packaged Linux installer bundles plus Linux installer smoke/build coverage in the release workflow; packaged Linux installs now deliver the precompiled runtime + skill pack alongside the existing macOS bundles
+- hardened Linux command behavior around the new installer/runtime split: macOS-only managed-wallet commands now fail fast on Linux, macOS-only helper binaries are no longer installed by source installs there, and daemon-socket recovery guidance now points Linux users to explicit source-managed sockets instead of `agentpay admin setup`
+- fixed Tempo session open/top-up signing so the daemon signs the standard transaction payload hash instead of a Keychain-wrapped hash, restoring server-side channel verification
+- fixed `agentpay admin token set-chain` so saved per-token limit changes refresh the live daemon policy attachment for existing wallets instead of leaving the daemon pinned to bootstrap-time limits
+
+Detailed release notes: [releases/v0.3.0.md](releases/v0.3.0.md)
 
 ## [0.2.0] - 2026-03-27
 

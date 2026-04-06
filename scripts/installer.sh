@@ -20,6 +20,8 @@ CURRENT_STEP=""
 CURRENT_STEP_HINT=""
 PROMPT_IN="/dev/stdin"
 PROMPT_OUT="/dev/stderr"
+PROMPT_IN_FD=0
+PROMPT_OUT_FD=2
 HAS_LOCAL_TTY=0
 INHERITED_PATH="${PATH:-}"
 SHELL_RC_PATH=""
@@ -88,7 +90,7 @@ Usage:
 
 What it does:
   - choose an install directory
-  - download a prebuilt AgentPay SDK runtime bundle for this macOS architecture
+  - download a prebuilt AgentPay SDK runtime bundle for this macOS or Linux architecture
   - install `agentpay` into a dedicated AGENTPAY_HOME without local Cargo or pnpm builds
   - auto-detect and preselect current AI agent skill targets
   - let the user toggle preset destinations and add custom skill/adaptor paths
@@ -100,7 +102,7 @@ What it does not do by default:
   - no local npm / pnpm workspace install
 
 What `--skills-only` does:
-  - download the standard AgentPay SDK macOS bundle and reuse its embedded skill files
+  - download the standard AgentPay SDK bundle and reuse its embedded skill files
   - auto-detect supported agent paths and present them as a toggleable install list
   - let the user add custom skill-pack or adapter destinations
   - skip Node, AgentPay SDK runtime, shell PATH, and wallet setup entirely
@@ -169,15 +171,63 @@ clear_macos_quarantine() {
   done
 }
 
+host_kernel_name() {
+  uname -s
+}
+
+host_bundle_platform_label() {
+  local kernel_name
+  kernel_name="$(host_kernel_name)"
+  case "$kernel_name" in
+    Darwin)
+      printf 'macos\n'
+      ;;
+    Linux)
+      printf 'linux\n'
+      ;;
+    *)
+      die "Unsupported operating system for the one-click runtime bundle: $kernel_name"
+      ;;
+  esac
+}
+
+host_arch_label() {
+  local machine
+  machine="$(uname -m)"
+  case "$machine" in
+    arm64|aarch64)
+      printf 'arm64\n'
+      ;;
+    x86_64)
+      printf 'x64\n'
+      ;;
+    *)
+      die "Unsupported architecture for the one-click bundle: $machine"
+      ;;
+  esac
+}
+
+runtime_bundle_requires_macos_helpers() {
+  [[ "$(host_kernel_name)" == "Darwin" ]]
+}
+
+host_supports_packaged_admin_setup() {
+  [[ "$(host_kernel_name)" == "Darwin" ]]
+}
+
 init_prompt_io() {
   if [[ "${AGENTPAY_SETUP_USE_STDIN:-}" == "1" ]]; then
     PROMPT_IN="/dev/stdin"
     PROMPT_OUT="/dev/stderr"
+    PROMPT_IN_FD=0
+    PROMPT_OUT_FD=2
     HAS_LOCAL_TTY=0
     return
   fi
 
   if [[ -r /dev/tty ]] && [[ -w /dev/tty ]]; then
+    exec {PROMPT_IN_FD}<>/dev/tty
+    PROMPT_OUT_FD="$PROMPT_IN_FD"
     PROMPT_IN="/dev/tty"
     PROMPT_OUT="/dev/tty"
     HAS_LOCAL_TTY=1
@@ -186,6 +236,8 @@ init_prompt_io() {
 
   PROMPT_IN="/dev/stdin"
   PROMPT_OUT="/dev/stderr"
+  PROMPT_IN_FD=0
+  PROMPT_OUT_FD=2
   HAS_LOCAL_TTY=0
 }
 
@@ -193,8 +245,8 @@ read_prompt() {
   local prompt="$1"
   local reply=""
 
-  printf '%s' "$prompt" >"$PROMPT_OUT"
-  IFS= read -r reply <"$PROMPT_IN" || die "Installer input closed while waiting for: $prompt"
+  printf '%s' "$prompt" >&$PROMPT_OUT_FD
+  IFS= read -r -u "$PROMPT_IN_FD" reply || die "Installer input closed while waiting for: $prompt"
   printf '%s\n' "$reply"
 }
 
@@ -220,16 +272,16 @@ read_prompt_with_default_reply() {
 
   remaining="$AUTO_CONTINUE_SECONDS"
   while (( remaining > 0 )); do
-    printf '\r\033[2K%s (auto in %ss) ' "$prompt" "$remaining" >"$PROMPT_OUT"
-    if IFS= read -r -t 1 reply <"$PROMPT_IN"; then
-      printf '\r\033[2K' >"$PROMPT_OUT"
+    printf '\r\033[2K%s (auto in %ss) ' "$prompt" "$remaining" >&$PROMPT_OUT_FD
+    if IFS= read -r -u "$PROMPT_IN_FD" -t 1 reply; then
+      printf '\r\033[2K' >&$PROMPT_OUT_FD
       printf '%s\n' "$reply"
       return
     fi
     remaining=$((remaining - 1))
   done
 
-  printf '\r\033[2K%s\n' "$default_notice" >"$PROMPT_OUT"
+  printf '\r\033[2K%s\n' "$default_notice" >&$PROMPT_OUT_FD
   printf '%s\n' "$default_reply"
 }
 
@@ -277,7 +329,7 @@ prompt_with_default() {
 
   reply="$(read_prompt_with_default_reply "$prompt [$default_value]" "$default_value" "Using default: $default_value")"
   if [[ -z "$reply" ]]; then
-    printf 'Using default: %s\n' "$default_value" >"$PROMPT_OUT"
+    printf 'Using default: %s\n' "$default_value" >&$PROMPT_OUT_FD
     printf '%s\n' "$default_value"
     return
   fi
@@ -519,17 +571,16 @@ resolve_run_admin_setup_default() {
 }
 
 resolve_runtime_bundle_asset_name() {
-  local machine
-  machine="$(uname -m)"
-  case "$machine" in
-    arm64|aarch64)
-      printf 'agentpay-sdk-macos-arm64.tar.gz\n'
-      ;;
-    x86_64)
-      printf 'agentpay-sdk-macos-x64.tar.gz\n'
+  printf 'agentpay-sdk-%s-%s.tar.gz\n' "$(host_bundle_platform_label)" "$(host_arch_label)"
+}
+
+resolve_skill_bundle_platform_label() {
+  case "$(host_kernel_name)" in
+    Darwin|Linux)
+      host_bundle_platform_label
       ;;
     *)
-      die "Unsupported macOS architecture for the one-click bundle: $machine"
+      printf 'linux\n'
       ;;
   esac
 }
@@ -540,7 +591,11 @@ resolve_default_bundle_url() {
   local asset_name
   release_repo="$PUBLIC_RELEASE_REPO"
   release_tag="$PUBLIC_RELEASE_TAG"
-  asset_name="$(resolve_runtime_bundle_asset_name)"
+  if installer_mode_is_skills_only; then
+    asset_name="agentpay-sdk-$(resolve_skill_bundle_platform_label)-$(host_arch_label).tar.gz"
+  else
+    asset_name="$(resolve_runtime_bundle_asset_name)"
+  fi
   printf 'https://github.com/%s/releases/download/%s/%s\n' "$release_repo" "$release_tag" "$asset_name"
 }
 
@@ -555,20 +610,52 @@ bundle_has_agent_template() {
   [[ -f "$bundle_dir/skills/agentpay-sdk/agents/$source_name" ]]
 }
 
+bundle_manifest_string_field() {
+  local bundle_dir="$1"
+  local field_name="$2"
+  local manifest_path="$bundle_dir/bundle-manifest.json"
+
+  [[ -f "$manifest_path" ]] || return 1
+
+  sed -n "s/.*\"$field_name\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" "$manifest_path" | head -n 1
+}
+
+runtime_bundle_manifest_matches_host() {
+  local bundle_dir="$1"
+  local manifest_platform=""
+  local manifest_arch=""
+  local expected_platform=""
+  local expected_arch=""
+
+  manifest_platform="$(bundle_manifest_string_field "$bundle_dir" "platform")"
+  manifest_arch="$(bundle_manifest_string_field "$bundle_dir" "arch")"
+  expected_platform="$(host_bundle_platform_label)"
+  expected_arch="$(host_arch_label)"
+
+  [[ "$manifest_platform" == "$expected_platform" ]] &&
+    [[ "$manifest_arch" == "$expected_arch" ]]
+}
+
 runtime_bundle_looks_usable() {
   local bundle_dir="$1"
 
   [[ -f "$bundle_dir/bundle-manifest.json" ]] &&
+    runtime_bundle_manifest_matches_host "$bundle_dir" &&
     [[ -f "$bundle_dir/app/package.json" ]] &&
     [[ -f "$bundle_dir/app/dist/cli.cjs" ]] &&
     [[ -d "$bundle_dir/app/node_modules" ]] &&
     [[ -x "$bundle_dir/runtime/bin/agentpay-daemon" ]] &&
     [[ -x "$bundle_dir/runtime/bin/agentpay-admin" ]] &&
     [[ -x "$bundle_dir/runtime/bin/agentpay-agent" ]] &&
-    [[ -x "$bundle_dir/runtime/bin/agentpay-system-keychain" ]] &&
-    [[ -x "$bundle_dir/runtime/bin/run-agentpay-daemon.sh" ]] &&
-    [[ -x "$bundle_dir/runtime/bin/install-user-daemon.sh" ]] &&
-    [[ -x "$bundle_dir/runtime/bin/uninstall-user-daemon.sh" ]] &&
+    {
+      ! runtime_bundle_requires_macos_helpers ||
+        {
+          [[ -x "$bundle_dir/runtime/bin/agentpay-system-keychain" ]] &&
+            [[ -x "$bundle_dir/runtime/bin/run-agentpay-daemon.sh" ]] &&
+            [[ -x "$bundle_dir/runtime/bin/install-user-daemon.sh" ]] &&
+            [[ -x "$bundle_dir/runtime/bin/uninstall-user-daemon.sh" ]]
+        }
+    } &&
     bundle_has_skill_pack "$bundle_dir"
 }
 
@@ -788,6 +875,8 @@ install_runtime_from_bundle() {
     "agentpay-daemon"
     "agentpay-admin"
     "agentpay-agent"
+  )
+  local macos_only_entries=(
     "agentpay-system-keychain"
     "run-agentpay-daemon.sh"
     "install-user-daemon.sh"
@@ -795,11 +884,18 @@ install_runtime_from_bundle() {
   )
   local entry=""
 
+  if runtime_bundle_requires_macos_helpers; then
+    managed_entries+=("${macos_only_entries[@]}")
+  fi
+
   mkdir -p "$RUNTIME_DIR/bin"
   rm -rf "$RUNTIME_DIR/app"
   mkdir -p "$RUNTIME_DIR/app"
   cp -R "$BUNDLE_ROOT/app"/. "$RUNTIME_DIR/app"/
 
+  for entry in "${macos_only_entries[@]}"; do
+    rm -f "$RUNTIME_DIR/bin/$entry"
+  done
   for entry in "${managed_entries[@]}"; do
     rm -f "$RUNTIME_DIR/bin/$entry"
     cp "$BUNDLE_ROOT/runtime/bin/$entry" "$RUNTIME_DIR/bin/$entry"
@@ -814,7 +910,9 @@ install_runtime_from_bundle() {
   [[ -x "$RUNTIME_DIR/bin/agentpay-daemon" ]] || die "Required AgentPay SDK runtime entry is missing after install: $RUNTIME_DIR/bin/agentpay-daemon"
   [[ -x "$RUNTIME_DIR/bin/agentpay-admin" ]] || die "Required AgentPay SDK runtime entry is missing after install: $RUNTIME_DIR/bin/agentpay-admin"
   [[ -x "$RUNTIME_DIR/bin/agentpay-agent" ]] || die "Required AgentPay SDK runtime entry is missing after install: $RUNTIME_DIR/bin/agentpay-agent"
-  [[ -x "$RUNTIME_DIR/bin/agentpay-system-keychain" ]] || die "Required AgentPay SDK runtime entry is missing after install: $RUNTIME_DIR/bin/agentpay-system-keychain"
+  if runtime_bundle_requires_macos_helpers; then
+    [[ -x "$RUNTIME_DIR/bin/agentpay-system-keychain" ]] || die "Required AgentPay SDK runtime entry is missing after install: $RUNTIME_DIR/bin/agentpay-system-keychain"
+  fi
 }
 
 install_skill_pack() {
@@ -1314,7 +1412,7 @@ print_skill_target_menu() {
       printf '  %2d. [%s] %s\n' "$((index + 1))" "$selected_marker" "$line"
     done
     printf '\nEnter numbers to toggle, `c` to add custom, Enter to install, or `s` to skip.\n'
-  } >"$PROMPT_OUT"
+  } >&$PROMPT_OUT_FD
 }
 
 first_selected_skill_target_index() {
@@ -1392,21 +1490,21 @@ render_skill_target_picker() {
     if [[ -n "$SKILL_TARGET_MENU_STATUS" ]]; then
       printf '\n%s\n' "$SKILL_TARGET_MENU_STATUS"
     fi
-  } >"$PROMPT_OUT"
+  } >&$PROMPT_OUT_FD
 }
 
 read_skill_target_picker_key() {
   local key=""
   local next=""
 
-  if ! IFS= read -r -s -n 1 -t 1 key <"$PROMPT_IN"; then
+  if ! IFS= read -r -u "$PROMPT_IN_FD" -s -n 1 -t 1 key; then
     return 1
   fi
 
   if [[ "$key" == $'\033' ]]; then
-    if IFS= read -r -s -n 1 -t 0.05 next <"$PROMPT_IN"; then
+    if IFS= read -r -u "$PROMPT_IN_FD" -s -n 1 -t 0.05 next; then
       key+="$next"
-      if [[ "$next" == "[" ]] && IFS= read -r -s -n 1 -t 0.05 next <"$PROMPT_IN"; then
+      if [[ "$next" == "[" ]] && IFS= read -r -u "$PROMPT_IN_FD" -s -n 1 -t 0.05 next; then
         key+="$next"
       fi
     fi
@@ -1439,7 +1537,7 @@ prompt_skill_target_selection_picker() {
       if (( remaining <= 0 )); then
         SKILL_TARGET_MENU_STATUS="Installing the current selection."
         render_skill_target_picker "$current_index" 0
-        printf '\n' >"$PROMPT_OUT"
+        printf '\n' >&$PROMPT_OUT_FD
         return 0
       fi
     fi
@@ -1480,11 +1578,11 @@ prompt_skill_target_selection_picker() {
         fi
         ;;
       ""|$'\n'|$'\r')
-        printf '\n' >"$PROMPT_OUT"
+        printf '\n' >&$PROMPT_OUT_FD
         return 0
         ;;
       c|C|a|A)
-        printf '\n' >"$PROMPT_OUT"
+        printf '\n' >&$PROMPT_OUT_FD
         prompt_custom_skill_target
         current_index=$((${#SKILL_TARGET_IDS[@]} - 1))
         SKILL_TARGET_MENU_STATUS="Custom destination added."
@@ -1493,7 +1591,7 @@ prompt_skill_target_selection_picker() {
         for ((current_index = 0; current_index < ${#SKILL_TARGET_SELECTED[@]}; current_index += 1)); do
           set_skill_target_selection "$current_index" "0"
         done
-        printf '\n' >"$PROMPT_OUT"
+        printf '\n' >&$PROMPT_OUT_FD
         return 0
         ;;
       *)
@@ -1523,7 +1621,7 @@ prompt_custom_skill_target() {
     printf '  5. Copilot instructions file\n'
     printf '  6. Cursor workspace adapter\n'
     printf '  7. Cline rules file\n\n'
-  } >"$PROMPT_OUT"
+  } >&$PROMPT_OUT_FD
 
   reply="$(trim_ascii_whitespace "$(read_prompt "Choose a custom target type ")")"
   case "$reply" in
@@ -1621,7 +1719,7 @@ prompt_skill_target_selection() {
         return 0
         ;;
       "")
-        printf 'Installing the preselected targets.\n' >"$PROMPT_OUT"
+        printf 'Installing the preselected targets.\n' >&$PROMPT_OUT_FD
         return 0
         ;;
       s|S|skip|SKIP)
@@ -1750,8 +1848,16 @@ maybe_run_admin_setup() {
   run_setup="$(resolve_run_admin_setup_default)"
 
   if [[ "$run_setup" == "no" ]]; then
-    say "Skipping wallet setup during one-click install. Run agentpay admin setup when you are ready to create or attach a wallet."
+    if host_supports_packaged_admin_setup; then
+      say "Skipping wallet setup during one-click install. Run agentpay admin setup when you are ready to create or attach a wallet."
+    else
+      say "Skipping wallet setup during one-click install. Linux bundle installs the packaged runtime and skills only; managed daemon setup and wallet bootstrap remain macOS-only."
+    fi
     return
+  fi
+
+  if ! host_supports_packaged_admin_setup; then
+    die "AGENTPAY_SETUP_RUN_ADMIN_SETUP=yes is not supported on this platform yet. The packaged Linux installer installs the runtime and skills only; managed daemon setup and wallet bootstrap are currently macOS-only."
   fi
 
   if (( HAS_LOCAL_TTY == 0 )); then
@@ -1763,6 +1869,55 @@ maybe_run_admin_setup() {
 }
 
 print_summary() {
+  if ! host_supports_packaged_admin_setup; then
+    if [[ -n "$CURRENT_SHELL_SHIM_PATH" ]]; then
+      cat <<EOF_SUMMARY
+
+AgentPay SDK install complete.
+
+Install root:
+  $INSTALL_DIR
+
+AgentPay SDK runtime:
+  $RUNTIME_DIR
+
+Run now in this shell:
+  agentpay --help
+
+Current-shell shim:
+  $CURRENT_SHELL_SHIM_PATH
+
+Linux packaged installs currently stop after the precompiled runtime + skill setup.
+For wallet creation or managed daemon setup, use macOS; that managed flow is not implemented for Linux yet.
+EOF_SUMMARY
+      return
+    fi
+
+    cat <<EOF_SUMMARY
+
+AgentPay SDK install complete.
+
+Install root:
+  $INSTALL_DIR
+
+AgentPay SDK runtime:
+  $RUNTIME_DIR
+
+Your current shell still needs the updated PATH:
+  source "$SHELL_RC_PATH"
+
+Current-shell shim was skipped:
+  ${CURRENT_SHELL_SHIM_WARNING:-unable to place agentpay into an existing PATH entry}
+
+Or run AgentPay directly right now without reloading the shell:
+  "$RUNTIME_DIR/bin/agentpay" --help
+
+Linux packaged installs currently stop after the precompiled runtime + skill setup.
+For wallet creation or managed daemon setup, use macOS; that managed flow is not implemented for Linux yet.
+EOF_SUMMARY
+    return
+  fi
+
   if [[ -n "$CURRENT_SHELL_SHIM_PATH" ]]; then
     cat <<EOF_SUMMARY
 
@@ -1864,10 +2019,6 @@ cleanup_temp_bundle() {
 
 main() {
   parse_args "$@"
-
-  if ! installer_mode_is_skills_only; then
-    [[ "$(uname -s)" == "Darwin" ]] || die "This installer currently supports macOS only."
-  fi
 
   init_prompt_io
   validate_installer_modes

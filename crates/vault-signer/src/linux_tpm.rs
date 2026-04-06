@@ -339,9 +339,7 @@ mod inner {
                 Self::tpm_seal(&device_path, &private_key_bytes)
             })
             .await
-            .map_err(|err| {
-                SignerError::Internal(format!("spawn_blocking join failed: {err}"))
-            })??;
+            .map_err(|err| SignerError::Internal(format!("spawn_blocking join failed: {err}")))??;
 
             let blob = LinuxTpmKeyBlob {
                 version: SEALED_BLOB_VERSION,
@@ -423,10 +421,9 @@ mod inner {
         ) -> Result<(), SignerError> {
             let mut restored = HashMap::with_capacity(persisted.len());
             for (vault_key_id, serialized) in persisted {
-                let blob: LinuxTpmKeyBlob =
-                    serde_json::from_str(serialized).map_err(|err| {
-                        SignerError::Internal(format!("blob deserialization failed: {err}"))
-                    })?;
+                let blob: LinuxTpmKeyBlob = serde_json::from_str(serialized).map_err(|err| {
+                    SignerError::Internal(format!("blob deserialization failed: {err}"))
+                })?;
 
                 if blob.version > SEALED_BLOB_VERSION {
                     return Err(SignerError::Internal(format!(
@@ -482,12 +479,11 @@ mod inner {
                     })?;
 
                 // Also verify the unsealed key matches the stored public key.
-                let probe_signing_key =
-                    SigningKey::from_slice(&plaintext).map_err(|_| {
-                        SignerError::Internal(format!(
-                            "key {probe_id_copy}: probe unseal returned invalid secp256k1 key"
-                        ))
-                    })?;
+                let probe_signing_key = SigningKey::from_slice(&plaintext).map_err(|_| {
+                    SignerError::Internal(format!(
+                        "key {probe_id_copy}: probe unseal returned invalid secp256k1 key"
+                    ))
+                })?;
                 let derived_pub = probe_signing_key
                     .verifying_key()
                     .to_encoded_point(false)
@@ -955,8 +951,7 @@ mod inner {
                 "sealed blob public length missing".into(),
             ));
         }
-        let public_len =
-            u32::from_le_bytes(sealed_blob[pos..pos + 4].try_into().unwrap()) as usize;
+        let public_len = u32::from_le_bytes(sealed_blob[pos..pos + 4].try_into().unwrap()) as usize;
         pos += 4;
         if pos + public_len > sealed_blob.len() {
             return Err(SignerError::Internal("sealed blob public truncated".into()));

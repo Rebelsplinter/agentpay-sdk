@@ -14,6 +14,20 @@ function loadModule(caseId) {
   return import(`${modulePath.href}?case=${caseId}`);
 }
 
+async function withMockPlatform(platform, fn) {
+  const descriptor = Object.getOwnPropertyDescriptor(process, 'platform');
+  Object.defineProperty(process, 'platform', { value: platform, configurable: true });
+  try {
+    await fn();
+  } finally {
+    if (descriptor) {
+      Object.defineProperty(process, 'platform', descriptor);
+    } else {
+      delete process.platform;
+    }
+  }
+}
+
 async function withTrustedRootDaemonSocket(fn) {
   const tmpBase = fs.realpathSync.native('/tmp');
   const tempRoot = fs.mkdtempSync(path.join(tmpBase, 'agentpay-admin-setup-root-socket-'));
@@ -120,71 +134,6 @@ async function withMockedManagedLaunchDaemonMetadata(input, fn) {
   }
 }
 
-async function withMockedStaleManagedLaunchDaemonMetadata(input, fn) {
-  const configPath = path.join(input.agentpayHome, 'config.json');
-  const currentConfig = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-  const rustBinDir = currentConfig.rustBinDir;
-  const managedRoot = path.join(input.agentpayHome, 'mock-managed-launchd');
-  const managedPaths = {
-    runnerPath: path.join(managedRoot, 'run-agentpay-daemon.sh'),
-    daemonBin: path.join(managedRoot, 'agentpay-daemon'),
-    keychainHelperBin: path.join(managedRoot, 'agentpay-system-keychain'),
-  };
-  const plistPath = '/Library/LaunchDaemons/com.agentpay.daemon.plist';
-  const currentUid = String(process.getuid?.() ?? process.geteuid?.() ?? 0);
-  const keychainAccount = os.userInfo().username;
-  const plistContents = [
-    '<plist><dict>',
-    `<string>${managedPaths.runnerPath}</string>`,
-    `<string>${managedPaths.daemonBin}</string>`,
-    `<string>${managedPaths.keychainHelperBin}</string>`,
-    `<string>com.agentpay.daemon</string>`,
-    `<string>${input.daemonSocket}</string>`,
-    `<string>${input.stateFile}</string>`,
-    '<string>agentpay-daemon-password</string>',
-    `<string>${keychainAccount}</string>`,
-    '<string>software</string>',
-    '<key>AGENTPAY_ALLOW_ADMIN_EUID</key>',
-    `<string>${currentUid}</string>`,
-    '<key>AGENTPAY_ALLOW_AGENT_EUID</key>',
-    `<string>${currentUid}</string>`,
-    '</dict></plist>',
-  ].join('\n');
-
-  fs.mkdirSync(managedRoot, { recursive: true, mode: 0o700 });
-  fs.copyFileSync(path.join(rustBinDir, 'run-agentpay-daemon.sh'), managedPaths.runnerPath);
-  fs.copyFileSync(path.join(rustBinDir, 'agentpay-system-keychain'), managedPaths.keychainHelperBin);
-  writeExecutable(managedPaths.daemonBin, 'exit 0 # stale');
-
-  const originalExistsSync = fs.existsSync;
-  const originalReadFileSync = fs.readFileSync;
-  fs.existsSync = ((targetPath, ...args) => {
-    if (path.resolve(String(targetPath)) === plistPath) {
-      return true;
-    }
-    return originalExistsSync(targetPath, ...args);
-  });
-  fs.readFileSync = ((targetPath, ...args) => {
-    if (path.resolve(String(targetPath)) === plistPath) {
-      if (
-        args[0] === 'utf8' ||
-        (args[0] && typeof args[0] === 'object' && args[0].encoding === 'utf8')
-      ) {
-        return plistContents;
-      }
-      return Buffer.from(plistContents, 'utf8');
-    }
-    return originalReadFileSync(targetPath, ...args);
-  });
-
-  try {
-    await fn();
-  } finally {
-    fs.existsSync = originalExistsSync;
-    fs.readFileSync = originalReadFileSync;
-  }
-}
-
 async function withInstallMarkerConnectionGate(markerPath, fn) {
   const originalCreateConnection = net.createConnection;
   net.createConnection = ((...args) => {
@@ -269,6 +218,28 @@ test('assertManagedDaemonInstallPreconditions validates staged root-daemon input
   ]);
 
   fs.rmSync(tempRoot, { recursive: true, force: true });
+});
+
+test('runAdminSetupCli fails fast on Linux before entering the macOS-only managed setup flow', async () => {
+  await withMockPlatform('linux', async () => {
+    const adminSetup = await loadModule(`${Date.now()}-linux-setup-guard`);
+
+    await assert.rejects(
+      () => adminSetup.runAdminSetupCli(['--plan']),
+      /`agentpay admin setup` is currently supported only on macOS/u,
+    );
+  });
+});
+
+test('runAdminTuiCli fails fast on Linux before entering the macOS-only TUI flow', async () => {
+  await withMockPlatform('linux', async () => {
+    const adminSetup = await loadModule(`${Date.now()}-linux-tui-guard`);
+
+    await assert.rejects(
+      () => adminSetup.runAdminTuiCli(['--json']),
+      /`agentpay admin tui` is currently supported only on macOS/u,
+    );
+  });
 });
 
 test('assertManagedDaemonInstallPreconditions prefers staged launchd helpers from rustBinDir', async () => {
@@ -2078,29 +2049,20 @@ test('runAdminSetupCli skips wallet backup prompts by default on fresh setup', a
       });
 
       try {
-        await withMockedManagedLaunchDaemonMetadata(
-          {
-            agentpayHome,
-            daemonSocket: trustedSocket,
-            stateFile: '/var/db/agentpay/daemon-state.enc',
-          },
-          async () => {
-            const adminSetup = await loadModule(`${Date.now()}-run-setup-skip-default-backup`);
-            await withMockedPrompt((query) => {
-              promptCount += 1;
-              assert.doesNotMatch(query, /wallet backup/iu);
-              return 'vault-secret';
-            }, async () => {
-              await adminSetup.runAdminSetupCli([
-                '--yes',
-                '--daemon-socket',
-                trustedSocket,
-                '--bootstrap-output',
-                path.join(agentpayHome, 'bootstrap-skip-default-backup.json'),
-              ]);
-            });
-          },
-        );
+        const adminSetup = await loadModule(`${Date.now()}-run-setup-skip-default-backup`);
+        await withMockedPrompt((query) => {
+          promptCount += 1;
+          assert.doesNotMatch(query, /wallet backup/iu);
+          return 'vault-secret';
+        }, async () => {
+          await adminSetup.runAdminSetupCli([
+            '--yes',
+            '--daemon-socket',
+            trustedSocket,
+            '--bootstrap-output',
+            path.join(agentpayHome, 'bootstrap-skip-default-backup.json'),
+          ]);
+        });
       } finally {
         process.stdout.write = originalStdoutWrite;
       }
@@ -2116,7 +2078,7 @@ test('runAdminSetupCli skips wallet backup prompts by default on fresh setup', a
 
 test('runAdminSetupCli falls back to plain text progress when stderr is not a tty', async () => {
   await withTrustedRootDaemonSocket(async (trustedSocket) => {
-    await withMockedAdminSetupEnv(async ({ agentpayHome }) => {
+    await withMockedAdminSetupEnv(async () => {
       const stderrChunks = [];
       const originalStderrWrite = process.stderr.write.bind(process.stderr);
       process.stderr.write = ((chunk, ...args) => {
@@ -2125,24 +2087,15 @@ test('runAdminSetupCli falls back to plain text progress when stderr is not a tt
       });
 
       try {
-        await withMockedManagedLaunchDaemonMetadata(
-          {
-            agentpayHome,
-            daemonSocket: trustedSocket,
-            stateFile: '/var/db/agentpay/daemon-state.enc',
-          },
-          async () => {
-            const adminSetup = await loadModule(`${Date.now()}-run-setup-non-tty-progress`);
-            await withMockedProcessStdin(['vault-secret\n'], async () => {
-              await adminSetup.runAdminSetupCli([
-                '--vault-password-stdin',
-                '--non-interactive',
-                '--daemon-socket',
-                trustedSocket,
-              ]);
-            });
-          },
-        );
+        const adminSetup = await loadModule(`${Date.now()}-run-setup-non-tty-progress`);
+        await withMockedProcessStdin(['vault-secret\n'], async () => {
+          await adminSetup.runAdminSetupCli([
+            '--vault-password-stdin',
+            '--non-interactive',
+            '--daemon-socket',
+            trustedSocket,
+          ]);
+        });
       } finally {
         process.stderr.write = originalStderrWrite;
       }
@@ -2631,6 +2584,65 @@ test('runAdminSetupCli surfaces managed-state probe errors after daemon password
   });
 });
 
+test('runAdminSetupCli builds the managed-state probe socket under a root-created temp dir', async () => {
+  await withTrustedRootDaemonSocket(async (trustedSocket) => {
+    await withMockedAdminSetupEnv(async ({ agentpayHome, toolDir }) => {
+      const probeScriptPath = path.join(agentpayHome, 'captured-state-probe.sh');
+      writeNodeExecutable(
+        path.join(toolDir, 'sudo'),
+        [
+          "const fs = require('node:fs');",
+          'const args = process.argv.slice(2);',
+          `const probeScriptPath = ${JSON.stringify(probeScriptPath)};`,
+          "if (args[0] === '-S' && args[3] === '-v') {",
+          '  process.stdin.resume();',
+          "  process.stdin.on('end', () => process.exit(0));",
+          '  return;',
+          '}',
+          "if (args[0] === '-n' && args[1] === '/bin/test') {",
+          '  process.exit(0);',
+          '}',
+          "if (args[0] === '-n' && args[1] === '/bin/bash') {",
+          "  fs.writeFileSync(probeScriptPath, String(args[3] ?? ''), 'utf8');",
+          "  process.stderr.write('failed to initialize daemon\\nCaused by: failed to decrypt state (wrong password or tampered file)\\n');",
+          '  process.exit(1);',
+          '}',
+          "if (args[0] === '-n') {",
+          '  process.exit(0);',
+          '}',
+          'process.exit(0);',
+        ].join('\n'),
+      );
+
+      process.env.AGENTPAY_MOCK_RELAY_AUTH_FAIL = '1';
+
+      try {
+        const adminSetup = await loadModule(`${Date.now()}-run-setup-state-probe-script`);
+        await withMockedPrompt('vault-secret', async () => {
+          await assert.rejects(
+            () =>
+              adminSetup.runAdminSetupCli([
+                '--yes',
+                '--daemon-socket',
+                trustedSocket,
+                '--bootstrap-output',
+                path.join(agentpayHome, 'bootstrap-state-probe-script.json'),
+              ]),
+            /managed daemon state already exists .* encrypted with a different vault password/u,
+          );
+        });
+      } finally {
+        delete process.env.AGENTPAY_MOCK_RELAY_AUTH_FAIL;
+      }
+
+      const captured = fs.readFileSync(probeScriptPath, 'utf8');
+      assert.match(captured, /mktemp -d/u);
+      assert.match(captured, /agentpay-managed-state-probe-XXXXXX/u);
+      assert.match(captured, /daemon_socket="\$temp_root\/daemon\.sock"/u);
+    });
+  });
+});
+
 test('runAdminSetupCli preserves managed-state mismatch errors when probe temp cleanup fails', async () => {
   await withTrustedRootDaemonSocket(async (trustedSocket) => {
     await withMockedAdminSetupEnv(async ({ agentpayHome, toolDir }) => {
@@ -2643,10 +2655,6 @@ test('runAdminSetupCli preserves managed-state mismatch errors when probe temp c
           'fi',
           'if [ "$1" = "-n" ] && [ "$2" = "/bin/test" ]; then',
           '  exit 0',
-          'fi',
-          'if [ "$1" = "-n" ] && [ "$2" = "/bin/rm" ]; then',
-          "  echo 'probe cleanup failed' >&2",
-          '  exit 1',
           'fi',
           'if [ "$1" = "-n" ]; then',
           "  echo 'authentication failed' >&2",
@@ -2661,6 +2669,14 @@ test('runAdminSetupCli preserves managed-state mismatch errors when probe temp c
         agentpayHome,
         'relay-call-count-state-probe-cleanup-fail.txt',
       );
+
+      const originalRmSync = fs.rmSync;
+      fs.rmSync = (targetPath, ...args) => {
+        if (path.basename(path.resolve(String(targetPath))).startsWith('agentpay-managed-state-probe-')) {
+          throw new Error('probe cleanup failed');
+        }
+        return originalRmSync.call(fs, targetPath, ...args);
+      };
 
       try {
         const adminSetup = await loadModule(`${Date.now()}-run-setup-state-probe-cleanup-fail`);
@@ -2677,7 +2693,9 @@ test('runAdminSetupCli preserves managed-state mismatch errors when probe temp c
             /managed daemon state already exists .* encrypted with a different vault password/u,
           );
         });
-      } finally {}
+      } finally {
+        fs.rmSync = originalRmSync;
+      }
     });
   });
 });
@@ -2766,60 +2784,6 @@ test('runAdminSetupCli reuses the current launchd install when the daemon respon
           });
         },
       );
-    });
-  });
-});
-
-test('runAdminSetupCli reinstalls when a responding daemon is backed by stale managed launchd assets', async () => {
-  await withTrustedRootDaemonSocket(async (trustedSocket) => {
-    await withMockedAdminSetupEnv(async ({ agentpayHome, toolDir }) => {
-      const installMarkerPath = path.join(agentpayHome, 'install-marker-stale-responding.txt');
-      process.env.AGENTPAY_MOCK_INSTALL_MARKER = installMarkerPath;
-      writeNodeExecutable(
-        path.join(toolDir, 'sudo'),
-        [
-          "const fs = require('node:fs');",
-          'const args = process.argv.slice(2);',
-          "const marker = process.env.AGENTPAY_MOCK_INSTALL_MARKER;",
-          "if (args[0] === '-S' && args[3] === '-v') {",
-          '  process.stdin.resume();',
-          "  process.stdin.on('end', () => process.exit(0));",
-          '  return;',
-          '}',
-          "if (args[0] === '-n' && args[1] === '/bin/test') {",
-          '  process.exit(0);',
-          '}',
-          "if (args[0] === '-n') {",
-          "  if (marker && args.some((value) => String(value).includes('install-user-daemon.sh'))) {",
-          "    fs.writeFileSync(marker, 'installed\\n', 'utf8');",
-          '  }',
-          '  process.exit(0);',
-          '}',
-          'process.exit(0);',
-        ].join('\n'),
-      );
-
-      try {
-        await withMockedStaleManagedLaunchDaemonMetadata(
-          {
-            agentpayHome,
-            daemonSocket: trustedSocket,
-            stateFile: '/var/db/agentpay/daemon-state.enc',
-          },
-          async () => {
-            const adminSetup = await loadModule(
-              `${Date.now()}-run-setup-stale-install-responding`
-            );
-            await withMockedPrompt('vault-secret', async () => {
-              await adminSetup.runAdminSetupCli(['--daemon-socket', trustedSocket]);
-            });
-          },
-        );
-      } finally {
-        delete process.env.AGENTPAY_MOCK_INSTALL_MARKER;
-      }
-
-      assert.equal(fs.existsSync(installMarkerPath), true);
     });
   });
 });

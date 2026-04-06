@@ -22,8 +22,8 @@ mod u128_as_decimal_string;
 
 pub use action::{
     action_from_erc20_calldata, parse_erc20_call, AgentAction, BroadcastTx, Eip3009Transfer,
-    Erc20Call, Permit2Permit, TempoSessionOpenTransaction, TempoSessionTopUpTransaction,
-    TempoSessionVoucher,
+    Eip712TypedData, Erc20Call, Permit2Permit, TempoSessionOpenTransaction,
+    TempoSessionTopUpTransaction, TempoSessionVoucher,
 };
 pub use address::EvmAddress;
 pub use approval::{
@@ -34,7 +34,7 @@ pub use constants::{DEFAULT_MAX_GAS_SPEND_PER_CHAIN_WEI, EIP7702_TX_TYPE};
 pub use error::DomainError;
 pub use keys::{AgentCredentials, AgentKey, KeySource, VaultKey};
 pub use nonce::{NonceReleaseRequest, NonceReservation, NonceReservationRequest};
-pub use policy::{AssetId, PolicyAttachment, PolicyType, SpendEvent, SpendingPolicy};
+pub use policy::{ApprovalType, AssetId, PolicyAttachment, PolicyType, SpendEvent, SpendingPolicy};
 pub use request::SignRequest;
 pub use scope::EntityScope;
 pub use session::{AdminSession, Lease};

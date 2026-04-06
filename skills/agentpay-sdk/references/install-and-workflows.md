@@ -2,7 +2,7 @@
 
 ## Install The Skill
 
-Fastest end-to-end bootstrap on macOS:
+Fastest packaged bootstrap on macOS or Linux:
 
 ```bash
 curl -fsSL https://wlfi.sh | bash
@@ -11,14 +11,15 @@ curl -fsSL https://wlfi.sh | bash
 That installer can:
 
 - choose an install directory
-- download a prebuilt macOS AgentPay SDK runtime bundle instead of compiling locally
+- download a prebuilt macOS or Linux AgentPay SDK runtime bundle instead of compiling locally
 - bootstrap missing Node 20+ when the machine does not already have it
 - install `agentpay`
 - auto-detect and preselect supported agent destinations that already exist
 - let the user toggle preset destinations and add custom skill-pack or adapter paths
 - install the AgentPay skill pack into Codex, Claude, Cline, Goose, Windsurf, OpenClaw, portable `.config/agents`, legacy `.agents`, and matching workspace skill directories
 - install workspace adapters for `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.github/copilot-instructions.md`, `.clinerules/agentpay-sdk.md`, and Cursor
-- stop after installation so the user can run `agentpay admin setup` separately
+- on macOS, stop after installation so the user can run `agentpay admin setup` separately
+- on Linux, stop after installing the packaged runtime + skill pack; managed daemon setup and wallet bootstrap remain macOS-only
 - do not configure browser-based relay or web approval services
 
 If the user only wants the skill pack and editor adapters, use:
@@ -28,7 +29,7 @@ curl -fsSL https://wlfi.sh | bash -s -- --skills-only
 ```
 
 That path skips the AgentPay SDK runtime install and only writes the AI skill targets.
-It reuses the standard macOS AgentPay SDK bundle, so release publishing only needs the normal installer assets.
+It reuses the standard AgentPay SDK bundle, so release publishing only needs the normal installer assets.
 
 Useful workspace overrides:
 
@@ -61,12 +62,16 @@ cp -R /path/to/agentpay-sdk ~/.claude/skills/agentpay-sdk
 Cursor root adapter:
 
 ```bash
-cp /path/to/agentpay-sdk/agents/AGENTS.md AGENTS.md
+mkdir -p /path/to/repo/.cursor/rules
+cp /path/to/agentpay-sdk/agents/cursor-agentpay-sdk.mdc /path/to/repo/.cursor/rules/agentpay-sdk.mdc
+cp /path/to/agentpay-sdk/agents/AGENTS.md /path/to/repo/AGENTS.md
 ```
 
 ## Install Or Update From Source
 
 From a repo checkout:
+
+Source installs build and install the CLI/runtime binaries on macOS and Linux. Windows does not yet support the Rust daemon/runtime from source in this repo. If you only need the JavaScript workspace on Windows, install with `AGENTPAY_SKIP_RUST_INSTALL=1 pnpm install`.
 
 ```bash
 pnpm install
@@ -86,6 +91,8 @@ If the runtime has already been refreshed and the user only needs to reconnect t
 ```bash
 agentpay admin setup --reuse-existing-wallet
 ```
+
+Managed wallet bootstrap commands such as `agentpay admin setup`, `agentpay admin tui`, `agentpay admin reset`, and `agentpay admin uninstall` currently require macOS because the managed daemon flow still depends on LaunchDaemon and macOS Keychain.
 
 ## Default Payment Assumption
 
@@ -114,14 +121,14 @@ agentpay wallet --json
 Interpret the result like this:
 
 - If `wallet --json` works, reuse the existing wallet.
-- If it fails with `wallet metadata is unavailable`, the agent should treat that as "wallet setup is not in a reusable state yet" and move to setup.
-- If `wallet --json` works but the user needs to re-run setup while preserving the same vault, use `agentpay admin setup --reuse-existing-wallet`.
+- If it fails with `wallet metadata is unavailable`, the agent should treat that as "wallet setup is not in a reusable state yet". On macOS, move to setup; on Linux, explain that managed wallet bootstrap is not implemented there yet.
+- If `wallet --json` works but the user needs to re-run setup while preserving the same vault, use `agentpay admin setup --reuse-existing-wallet` on macOS.
 
 ## First-Run Setup
 
 Do not ask the user to paste `VAULT_PASSWORD` into chat.
 
-Run:
+Run on macOS:
 
 ```bash
 agentpay admin setup
@@ -253,6 +260,8 @@ Do not ask the user to paste `VAULT_PASSWORD` into chat for policy work.
 
 Default path:
 
+On macOS:
+
 ```bash
 agentpay admin tui
 ```
@@ -264,15 +273,19 @@ Use the TUI when the user wants to:
 - add destination-specific rules
 - review or resolve approval requests
 
+On Linux, explain that the packaged/runtime install currently has no `agentpay admin tui` path and only edits saved shared config.
+
 When guiding the user, keep it concrete:
 
-- tell them to open `agentpay admin tui`
+- tell them to open `agentpay admin tui` on macOS
 - tell them which network and token to edit
 - tell them the exact ceilings or approval thresholds to enter
 
 ## Policy CLI Reference
 
 Only use the raw commands below if the user explicitly asks for exact CLI commands instead of the TUI.
+
+`agentpay admin token set-chain ...` writes the saved shared config and, when reusable wallet metadata exists, immediately tries to sync those per-token limits to the live daemon attachment for the existing wallet. The CLI prompts locally for the vault password unless `--vault-password-stdin` is supplied. If the live apply step fails, the command restores the previous saved config and exits.
 
 ### Native or Token Default Limits
 

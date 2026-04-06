@@ -5,19 +5,20 @@
 - One-click bootstrap: `curl -fsSL https://wlfi.sh | bash`
 - One-click skills only: `curl -fsSL https://wlfi.sh | bash -s -- --skills-only`
 - One-click update: rerun `curl -fsSL https://wlfi.sh | bash`
+- One-click packaged runtime bundles are available on macOS and Linux. Linux one-click installs currently stop after the precompiled runtime + skill setup, and managed daemon setup / wallet bootstrap remain macOS-only.
 - Source install or update: `pnpm install && npm run build && npm run install:cli-launcher && npm run install:rust-binaries`
 - Show config: `agentpay config show --json`
 - Reuse wallet: `agentpay wallet --json`
-- Set up wallet: `agentpay admin setup`
-- Reuse existing wallet during setup recovery: `agentpay admin setup --reuse-existing-wallet`
-- Restore wallet from encrypted backup: `agentpay admin setup --restore-wallet-from <PATH>`
+- Set up wallet on macOS: `agentpay admin setup`
+- Reuse existing wallet during setup recovery on macOS: `agentpay admin setup --reuse-existing-wallet`
+- Restore wallet from encrypted backup on macOS: `agentpay admin setup --restore-wallet-from <PATH>`
 - Export encrypted wallet backup: `agentpay admin wallet-backup export --output <PATH>`
 - Verify encrypted wallet backup: `agentpay admin wallet-backup verify <PATH>`
-- Open policy TUI: `agentpay admin tui`
+- Open policy TUI on macOS: `agentpay admin tui`
 - Check native balance: `agentpay rpc balance --address <ADDRESS> --rpc-url <RPC_URL> --json`
 - Check ERC-20 balance: `agentpay rpc balance --address <ADDRESS> --token <TOKEN> --rpc-url <RPC_URL> --json`
 - Generate funding QR payload: `node scripts/prepare-funding-request.mjs --address <ADDRESS> --chain-id <CHAIN_ID> --network-name <NAME> --json`
-- Set default token policy: `agentpay admin token set-chain <tokenKey> <chainKey> --per-tx <amount> --daily <amount> --weekly <amount>`
+- Set default token policy and sync the live daemon attachment when wallet metadata exists: `agentpay admin token set-chain <tokenKey> <chainKey> --per-tx <amount> --daily <amount> --weekly <amount> [--vault-password-stdin] [--non-interactive]`
 - Add manual approval policy: `agentpay admin add-manual-approval-policy --network <id> --min-amount-wei <wei> --max-amount-wei <wei> ...`
 - List manual approval requests: `agentpay admin list-manual-approval-requests`
 - Approve manual approval request: `agentpay admin approve-manual-approval-request`
@@ -37,11 +38,14 @@
 - Never ask the user to paste a wallet backup password into chat.
 - Do not ask the user for a vault password before policy or admin mutations.
 - For setup and agent-auth admin flows, use a local secure prompt.
-- For policy changes, default to `agentpay admin tui`.
-- `agentpay admin setup` should be run locally so the CLI can prompt securely if needed.
+- For policy changes, default to `agentpay admin tui` on macOS.
+- `agentpay admin token set-chain ...` is the non-TUI path for default per-token limits. It updates saved config and attempts to refresh the live daemon attachment for the existing wallet.
+- `agentpay admin token set-chain ...` needs a local secure prompt or `--vault-password-stdin`. If the apply step fails, do not claim the saved config or daemon policy changed.
+- `agentpay admin setup` should be run locally on macOS so the CLI can prompt securely if needed.
 - `agentpay wallet --json` is the wallet reuse check.
-- If the wallet exists and the user wants to preserve it while re-running setup, use `agentpay admin setup --reuse-existing-wallet`.
-- If the machine is new or the local wallet is gone and the user has a backup, use `agentpay admin setup --restore-wallet-from <PATH>`.
+- If the wallet exists and the user wants to preserve it while re-running setup, use `agentpay admin setup --reuse-existing-wallet` on macOS.
+- If the machine is new or the local wallet is gone and the user has a backup, use `agentpay admin setup --restore-wallet-from <PATH>` on macOS.
+- On Linux, do not direct the user to `agentpay admin setup` or `agentpay admin tui`; explain that the packaged/runtime install currently stops before the managed wallet bootstrap flow.
 - If the user does not specify network or asset for a payment, default to `USD1` on `bsc`.
 - If a request enters manual approval, say it is pending user approval instead of saying it failed.
 - For manual approval, prefer the local admin CLI approval commands.
@@ -62,14 +66,14 @@
 - `x402` supports exact/EIP-3009 payment requirements.
 - `mpp` supports charge on any EVM chain and session on Tempo chains.
 - For Bitrefill quote and preview output, `amount` is the raw onchain base-unit integer, not a human-decimal amount. Example: ETH base units are wei, and `amount: 1000000` with `decimals: 6` means `1 USDC`.
-- Destination overrides still belong to `agentpay admin tui`.
+- Destination overrides still belong to `agentpay admin tui` on macOS.
 - If the user only asks what the skill can do, answer directly from the skill instead of probing the machine.
 
 ## Secure Paths
 
-- Setup: `agentpay admin setup`
-- Setup recovery with the same vault: `agentpay admin setup --reuse-existing-wallet`
-- Policy editing: `agentpay admin tui`
+- Setup on macOS: `agentpay admin setup`
+- Setup recovery with the same vault on macOS: `agentpay admin setup --reuse-existing-wallet`
+- Policy editing on macOS: `agentpay admin tui`
 - Manual approval: `agentpay admin list-manual-approval-requests`
 
 ## Built-In Defaults

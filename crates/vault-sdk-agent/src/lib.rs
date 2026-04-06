@@ -11,8 +11,8 @@ use uuid::Uuid;
 use vault_daemon::{DaemonError, KeyManagerDaemonApi};
 use vault_domain::{
     action_from_erc20_calldata, AgentAction, AgentCredentials, BroadcastTx, DomainError,
-    Eip3009Transfer, EvmAddress, NonceReleaseRequest, NonceReservation, NonceReservationRequest,
-    Permit2Permit, SignRequest, Signature, TempoSessionOpenTransaction,
+    Eip3009Transfer, Eip712TypedData, EvmAddress, NonceReleaseRequest, NonceReservation,
+    NonceReservationRequest, Permit2Permit, SignRequest, Signature, TempoSessionOpenTransaction,
     TempoSessionTopUpTransaction, TempoSessionVoucher,
 };
 use zeroize::Zeroizing;
@@ -91,6 +91,12 @@ pub trait AgentOperations: Send + Sync {
     async fn tempo_session_voucher(
         &self,
         authorization: TempoSessionVoucher,
+    ) -> Result<Signature, AgentSdkError>;
+
+    /// Requests an arbitrary EIP-712 typed-data signature.
+    async fn eip712_typed_data(
+        &self,
+        typed_data: Eip712TypedData,
     ) -> Result<Signature, AgentSdkError>;
 
     /// Parses ERC-20 calldata and signs derived action (`approve` / `transfer`).
@@ -276,6 +282,14 @@ where
         authorization: TempoSessionVoucher,
     ) -> Result<Signature, AgentSdkError> {
         self.sign_action(AgentAction::TempoSessionVoucher { authorization })
+            .await
+    }
+
+    async fn eip712_typed_data(
+        &self,
+        typed_data: Eip712TypedData,
+    ) -> Result<Signature, AgentSdkError> {
+        self.sign_action(AgentAction::Eip712TypedData { typed_data })
             .await
     }
 
@@ -983,7 +997,7 @@ mod typed_data_tests {
     use super::tests::{test_credentials, RecordingDaemon};
     use super::{AgentOperations, AgentSdk, AgentSdkError};
     use time::OffsetDateTime;
-    use vault_domain::{AgentAction, DomainError, Eip3009Transfer, Permit2Permit};
+    use vault_domain::{AgentAction, DomainError, Eip3009Transfer, Eip712TypedData, Permit2Permit};
 
     fn unix_timestamp(value: OffsetDateTime) -> u64 {
         value.unix_timestamp().try_into().expect("unix timestamp")
@@ -1250,5 +1264,94 @@ mod typed_data_tests {
             .await
             .expect("erc20 transfer");
         assert_eq!(signature.bytes, vec![0x11, 0x22]);
+    }
+
+    #[tokio::test]
+    async fn eip712_typed_data_sends_canonical_action_payload() {
+        let daemon = Arc::new(RecordingDaemon::default());
+        let sdk = AgentSdk::new(daemon.clone(), test_credentials());
+        let typed_data = Eip712TypedData {
+            typed_data_json: r#"{
+  "types": {
+    "EIP712Domain": [
+      { "name": "name", "type": "string" },
+      { "name": "version", "type": "string" },
+      { "name": "chainId", "type": "uint256" },
+      { "name": "verifyingContract", "type": "address" }
+    ],
+    "Mail": [
+      { "name": "contents", "type": "string" }
+    ]
+  },
+  "primaryType": "Mail",
+  "domain": {
+    "name": "AgentPay Test",
+    "version": "1",
+    "chainId": 1,
+    "verifyingContract": "0x1111111111111111111111111111111111111111"
+  },
+  "message": {
+    "contents": "hello"
+  }
+}"#
+            .to_string(),
+        };
+
+        let signature = sdk
+            .eip712_typed_data(typed_data.clone())
+            .await
+            .expect("eip712 typed data");
+        assert_eq!(signature.bytes, vec![0x11, 0x22]);
+
+        let captured = daemon
+            .request
+            .lock()
+            .expect("lock")
+            .clone()
+            .expect("captured request");
+        assert_eq!(
+            captured.action,
+            AgentAction::Eip712TypedData {
+                typed_data: typed_data.clone(),
+            }
+        );
+        let decoded: AgentAction = serde_json::from_slice(&captured.payload).expect("decode");
+        assert_eq!(decoded, captured.action);
+    }
+
+    #[tokio::test]
+    async fn eip712_typed_data_rejects_missing_chain_id() {
+        let daemon = Arc::new(RecordingDaemon::default());
+        let sdk = AgentSdk::new(daemon, test_credentials());
+        let typed_data = Eip712TypedData {
+            typed_data_json: r#"{
+  "types": {
+    "EIP712Domain": [
+      { "name": "name", "type": "string" }
+    ],
+    "Mail": [
+      { "name": "contents", "type": "string" }
+    ]
+  },
+  "primaryType": "Mail",
+  "domain": {
+    "name": "AgentPay Test"
+  },
+  "message": {
+    "contents": "hello"
+  }
+}"#
+            .to_string(),
+        };
+
+        let err = sdk
+            .eip712_typed_data(typed_data)
+            .await
+            .expect_err("missing chain id must be rejected");
+        assert!(matches!(
+            err,
+            AgentSdkError::Domain(DomainError::InvalidTypedDataDomain(message))
+                if message.contains("chainId")
+        ));
     }
 }

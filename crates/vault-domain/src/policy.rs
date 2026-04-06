@@ -35,6 +35,15 @@ pub enum PolicyType {
     PerTxMaxCalldataBytes,
     PerChainMaxGasSpend,
     ManualApproval,
+    Eip712Signing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalType {
+    Allow,
+    ManualApproval,
+    Deny,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +61,7 @@ pub struct SpendingPolicy {
     pub recipients: EntityScope<EvmAddress>,
     pub assets: EntityScope<AssetId>,
     pub networks: EntityScope<u64>,
+    pub approval_type: Option<ApprovalType>,
     pub enabled: bool,
 }
 
@@ -105,6 +115,8 @@ struct SpendingPolicyWire {
     recipients: EntityScope<EvmAddress>,
     assets: EntityScope<AssetId>,
     networks: EntityScope<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    approval_type: Option<ApprovalType>,
     enabled: bool,
 }
 
@@ -124,6 +136,7 @@ impl From<&SpendingPolicy> for SpendingPolicyWire {
             recipients: policy.recipients.clone(),
             assets: policy.assets.clone(),
             networks: policy.networks.clone(),
+            approval_type: policy.approval_type,
             enabled: policy.enabled,
         }
     }
@@ -145,8 +158,44 @@ impl SpendingPolicyWire {
             recipients,
             assets,
             networks,
+            approval_type,
             enabled,
         } = self;
+
+        if policy_type == PolicyType::Eip712Signing {
+            if min_amount_wei.is_some()
+                || max_amount_wei.is_some()
+                || max_tx_count.is_some()
+                || max_fee_per_gas_wei.is_some()
+                || max_priority_fee_per_gas_wei.is_some()
+                || max_calldata_bytes.is_some()
+                || max_gas_spend_wei.is_some()
+            {
+                return Err("eip712_signing does not accept numeric limit fields");
+            }
+
+            return Ok(SpendingPolicy {
+                id,
+                priority,
+                policy_type,
+                min_amount_wei: None,
+                max_amount_wei: 0,
+                max_tx_count: None,
+                max_fee_per_gas_wei: None,
+                max_priority_fee_per_gas_wei: None,
+                max_calldata_bytes: None,
+                max_gas_spend_wei: None,
+                recipients,
+                assets,
+                networks,
+                approval_type: Some(approval_type.ok_or("missing field `approval_type`")?),
+                enabled,
+            });
+        }
+
+        if approval_type.is_some() {
+            return Err("field `approval_type` is only valid for `eip712_signing`");
+        }
 
         let max_amount_wei = if SpendingPolicy::uses_amount_limit_field(policy_type) {
             max_amount_wei.ok_or("missing field `max_amount_wei`")?
@@ -180,6 +229,7 @@ impl SpendingPolicyWire {
             recipients,
             assets,
             networks,
+            approval_type: None,
             enabled,
         }
         .normalize_limits())
@@ -264,6 +314,32 @@ impl SpendingPolicy {
             assets,
             networks,
         )
+    }
+
+    pub fn new_eip712_signing(
+        priority: u32,
+        approval_type: ApprovalType,
+        networks: EntityScope<u64>,
+    ) -> Result<Self, DomainError> {
+        Self::validate_network_scope(&networks)?;
+
+        Ok(Self {
+            id: Uuid::new_v4(),
+            priority,
+            policy_type: PolicyType::Eip712Signing,
+            min_amount_wei: None,
+            max_amount_wei: 0,
+            max_tx_count: None,
+            max_fee_per_gas_wei: None,
+            max_priority_fee_per_gas_wei: None,
+            max_calldata_bytes: None,
+            max_gas_spend_wei: None,
+            recipients: EntityScope::All,
+            assets: EntityScope::All,
+            networks,
+            approval_type: Some(approval_type),
+            enabled: true,
+        })
     }
 
     pub fn new_calldata_limit(
@@ -402,6 +478,7 @@ impl SpendingPolicy {
             recipients,
             assets,
             networks,
+            approval_type: None,
             enabled: true,
         })
     }
@@ -431,6 +508,13 @@ impl SpendingPolicy {
     #[must_use]
     pub fn gas_spend_limit_wei(&self) -> Option<u128> {
         self.specialized_limit(self.max_gas_spend_wei, PolicyType::PerChainMaxGasSpend)
+    }
+
+    #[must_use]
+    pub fn eip712_approval_type(&self) -> Option<ApprovalType> {
+        (self.policy_type == PolicyType::Eip712Signing)
+            .then_some(self.approval_type)
+            .flatten()
     }
 
     fn normalize_limits(mut self) -> Self {
@@ -581,6 +665,7 @@ impl SpendingPolicy {
             recipients,
             assets,
             networks,
+            approval_type: None,
             enabled: true,
         };
 

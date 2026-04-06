@@ -23,7 +23,7 @@ die() {
 
 usage() {
   cat <<'EOF_USAGE'
-Run a GitHub-friendly macOS smoke test for the AgentPay one-click installer.
+Run a GitHub-friendly smoke test for the AgentPay one-click installer.
 
 Usage:
   scripts/run-installer-smoke.sh [options]
@@ -38,9 +38,7 @@ Behavior:
   - runs scripts/installer.sh against a prebuilt bundle twice
   - uses a fake HOME so shell RC writes do not pollute the host runner
   - skips skills and admin setup
-  - verifies agentpay and key runtime binaries after install
-
-This script is intended for macOS CI runners and local macOS smoke runs.
+  - verifies agentpay and the required runtime binaries after install
 EOF_USAGE
 }
 
@@ -81,11 +79,21 @@ normalize_keep_work_dir() {
 }
 
 require_host() {
-  [[ "$(uname -s)" == "Darwin" ]] || die "This smoke runner currently supports macOS only."
+  case "$(uname -s)" in
+    Darwin|Linux)
+      ;;
+    *)
+      die "This smoke runner currently supports only macOS or Linux hosts."
+      ;;
+  esac
   command -v tar >/dev/null 2>&1 || die "tar is required."
   command -v bash >/dev/null 2>&1 || die "bash is required."
   [[ -n "$BUNDLE_ARCHIVE" ]] || die "--bundle-archive is required."
   [[ -f "$BUNDLE_ARCHIVE" ]] || die "Bundle archive does not exist: $BUNDLE_ARCHIVE"
+}
+
+runtime_requires_macos_entries() {
+  [[ "$(uname -s)" == "Darwin" ]]
 }
 
 prepare_dirs() {
@@ -156,15 +164,18 @@ verify_install() {
   [[ -x "$runtime_dir/bin/agentpay-admin" ]] || die "Missing agentpay-admin runtime entry after install."
   [[ -x "$runtime_dir/bin/agentpay-daemon" ]] || die "Missing agentpay-daemon runtime entry after install."
   [[ -x "$runtime_dir/bin/agentpay-agent" ]] || die "Missing agentpay-agent runtime entry after install."
-  [[ -x "$runtime_dir/bin/agentpay-system-keychain" ]] || die "Missing agentpay-system-keychain runtime entry after install."
   [[ -f "$runtime_dir/app/package.json" ]] || die "Missing packaged CLI metadata after install."
   [[ -f "$runtime_dir/app/dist/cli.cjs" ]] || die "Missing packaged CLI entrypoint after install."
   [[ -d "$runtime_dir/app/node_modules" ]] || die "Missing packaged CLI runtime dependencies after install."
+  if runtime_requires_macos_entries; then
+    [[ -x "$runtime_dir/bin/agentpay-system-keychain" ]] || die "Missing agentpay-system-keychain runtime entry after install."
+  fi
 
   run_and_capture "$verify_log" env \
     HOME="$HOME_DIR" \
     PATH="$runtime_dir/bin:${PATH}" \
     AGENTPAY_HOME="$runtime_dir" \
+    EXPECT_MACOS_RUNTIME="$(if runtime_requires_macos_entries; then printf '1'; else printf '0'; fi)" \
     bash -c '
       set -euo pipefail
       command -v agentpay
@@ -174,7 +185,9 @@ verify_install() {
       test -x "$AGENTPAY_HOME/bin/agentpay-admin"
       test -x "$AGENTPAY_HOME/bin/agentpay-daemon"
       test -x "$AGENTPAY_HOME/bin/agentpay-agent"
-      test -x "$AGENTPAY_HOME/bin/agentpay-system-keychain"
+      if [[ "${EXPECT_MACOS_RUNTIME:-0}" == "1" ]]; then
+        test -x "$AGENTPAY_HOME/bin/agentpay-system-keychain"
+      fi
       test -f "$AGENTPAY_HOME/app/package.json"
       test -f "$AGENTPAY_HOME/app/dist/cli.cjs"
       test -d "$AGENTPAY_HOME/app/node_modules"

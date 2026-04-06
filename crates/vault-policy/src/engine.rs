@@ -1,6 +1,8 @@
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
-use vault_domain::{AgentAction, PolicyAttachment, PolicyType, SpendEvent, SpendingPolicy};
+use vault_domain::{
+    AgentAction, ApprovalType, PolicyAttachment, PolicyType, SpendEvent, SpendingPolicy,
+};
 
 use crate::{PolicyDecision, PolicyError, PolicyEvaluation, PolicyExplanation};
 
@@ -59,6 +61,13 @@ pub(crate) fn enforce_calldata_bytes_limit(
 pub struct PolicyEngine;
 
 impl PolicyEngine {
+    fn default_eip712_manual_approval() -> PolicyError {
+        PolicyError::Eip712ManualApprovalRequired {
+            policy_id: None,
+            policy_suffix: String::new(),
+        }
+    }
+
     /// Evaluates all applicable policies.
     ///
     /// A request is approved only if every applicable policy passes.
@@ -109,11 +118,55 @@ impl PolicyEngine {
                 attached_policy_ids,
                 applicable_policy_ids: Vec::new(),
                 evaluated_policy_ids: Vec::new(),
-                decision: if matches!(attachment, PolicyAttachment::AllPolicies) {
+                decision: if action.requires_eip712_policy() {
+                    PolicyDecision::Deny(Self::default_eip712_manual_approval())
+                } else if matches!(attachment, PolicyAttachment::AllPolicies) {
                     PolicyDecision::Allow
                 } else {
                     PolicyDecision::Deny(PolicyError::NoAttachedPolicies)
                 },
+            };
+        }
+
+        if action.requires_eip712_policy() {
+            let action_chain_id = action.chain_id();
+            let applicable: Vec<&SpendingPolicy> = attached
+                .into_iter()
+                .filter(|p| {
+                    p.policy_type == PolicyType::Eip712Signing
+                        && p.networks.allows(&action_chain_id)
+                })
+                .collect();
+            let applicable_policy_ids = applicable.iter().map(|p| p.id).collect::<Vec<_>>();
+            if applicable.is_empty() {
+                return PolicyExplanation {
+                    attached_policy_ids,
+                    applicable_policy_ids,
+                    evaluated_policy_ids: Vec::new(),
+                    decision: PolicyDecision::Deny(Self::default_eip712_manual_approval()),
+                };
+            }
+
+            let mut evaluated_policy_ids = Vec::with_capacity(applicable.len());
+            for policy in applicable {
+                evaluated_policy_ids.push(policy.id);
+                if let Err(err) =
+                    self.evaluate_single_policy(policy, action, spend_history, agent_key_id, now)
+                {
+                    return PolicyExplanation {
+                        attached_policy_ids,
+                        applicable_policy_ids,
+                        evaluated_policy_ids,
+                        decision: PolicyDecision::Deny(err),
+                    };
+                }
+            }
+
+            return PolicyExplanation {
+                attached_policy_ids,
+                applicable_policy_ids,
+                evaluated_policy_ids,
+                decision: PolicyDecision::Allow,
             };
         }
 
@@ -124,7 +177,8 @@ impl PolicyEngine {
         let applicable: Vec<&SpendingPolicy> = attached
             .into_iter()
             .filter(|p| {
-                p.assets.allows(&action_asset)
+                p.policy_type != PolicyType::Eip712Signing
+                    && p.assets.allows(&action_asset)
                     && p.recipients.allows(&action_recipient)
                     && p.networks.allows(&action_chain_id)
             })
@@ -253,6 +307,22 @@ impl PolicyEngine {
                         max_amount_wei: policy.max_amount_wei,
                         requested_amount_wei,
                     });
+                }
+            }
+            PolicyType::Eip712Signing => {
+                match policy.eip712_approval_type().unwrap_or(ApprovalType::Deny) {
+                    ApprovalType::Allow => {}
+                    ApprovalType::ManualApproval => {
+                        return Err(PolicyError::Eip712ManualApprovalRequired {
+                            policy_id: Some(policy.id),
+                            policy_suffix: format!(" (policy {})", policy.id),
+                        });
+                    }
+                    ApprovalType::Deny => {
+                        return Err(PolicyError::Eip712SigningDenied {
+                            policy_id: policy.id,
+                        });
+                    }
                 }
             }
         }

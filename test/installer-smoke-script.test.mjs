@@ -12,7 +12,7 @@ test('installer smoke helper exposes a stable help entrypoint', () => {
   });
 
   assert.equal(result.status, 0, result.stderr || result.stdout);
-  assert.match(result.stdout, /Run a GitHub-friendly macOS smoke test/u);
+  assert.match(result.stdout, /Run a GitHub-friendly smoke test/u);
   assert.match(result.stdout, /--work-dir/u);
   assert.match(result.stdout, /--bundle-archive/u);
   assert.match(result.stdout, /--keep-work-dir/u);
