@@ -9,9 +9,7 @@ All notable changes to AgentPay SDK are documented in this file.
 - generic EIP-712 signing now defaults to manual approval and is evaluated separately from spend-limit accounting
 - improved `agentpay mpp` session flows by selecting the correct challenge when a server returns multiple MPP challenges and by handling `payment-need-voucher` stream control events in text mode with automatic voucher/top-up follow-up
 - added Tempo session demo tooling with `pnpm example:mpp:session-demo`, `pnpm example:mpp:session-server`, and expanded local server examples for persisted session open, reuse, and close flows
-- improved source-install and admin-setup ergonomics: source installs now support macOS and Linux, Windows source installs fail fast with a JavaScript-only fallback hint, and runtime refresh still reuses the existing wallet through `agentpay admin setup --reuse-existing-wallet`
-- added packaged Linux installer bundles plus Linux installer smoke/build coverage in the release workflow; packaged Linux installs now deliver the precompiled runtime + skill pack alongside the existing macOS bundles
-- hardened Linux command behavior around the new installer/runtime split: macOS-only managed-wallet commands now fail fast on Linux, macOS-only helper binaries are no longer installed by source installs there, and daemon-socket recovery guidance now points Linux users to explicit source-managed sockets instead of `agentpay admin setup`
+- improved source-install and admin-setup ergonomics: Windows source installs fail fast with a JavaScript-only fallback hint, and runtime refresh still reuses the existing wallet through `agentpay admin setup --reuse-existing-wallet`
 - fixed Tempo session open/top-up signing so the daemon signs the standard transaction payload hash instead of a Keychain-wrapped hash, restoring server-side channel verification
 - fixed `agentpay admin token set-chain` so saved per-token limit changes refresh the live daemon policy attachment for existing wallets instead of leaving the daemon pinned to bootstrap-time limits
 
