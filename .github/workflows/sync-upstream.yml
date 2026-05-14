@@ -1,9 +1,10 @@
 name: Sync upstream
 
 on:
-  schedule:
-    # Daily at 06:00 UTC (09:00 MSK)
-    - cron: '0 6 * * *'
+  # Scheduled sync disabled — trigger manually via workflow_dispatch.
+  # To re-enable, restore the schedule block below:
+  #   schedule:
+  #     - cron: '0 6 * * *'
   workflow_dispatch:
 
 jobs:
